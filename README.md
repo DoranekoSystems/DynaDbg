@@ -1,8 +1,16 @@
 # DynaDbg
-Next-Generation Remote Analysis Suite for iOS
-
+Next-Generation Remote Analysis Suite for iOS.  
 This project is not open source and remains under private development!
 
+# Support OS
+
+## Host
+- Windows(x86_64)
+- Mac(arm64)
+
+## Remote
+- iOS(arm64)
+  
 # Usage
 
 ## iOS
@@ -25,3 +33,8 @@ ldid -SEntitlements.plist dbgsrv
 The httpserver starts at port `3030`.
 
 <img width="1512" height="1112" alt="screenshot" src="https://github.com/user-attachments/assets/35b2d9ae-4102-49f9-af44-ba2859334cda" />
+
+### Function
+
+- Memory Scan
+- Hardware Watchpoint
