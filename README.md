@@ -41,3 +41,8 @@ The httpserver starts at port `3030`.
 
 - Hardware Watchpoint
 <img width="500" height="356" alt="screenshot" src="https://github.com/user-attachments/assets/15a068cb-e77b-408e-a9e5-2d5482c5adbf" />
+
+## Documentation
+
+For detailed technical specifications and implementation details, please refer to:
+- [Creating a GUI-based macOS&iOS ARM64 Debugger.pdf](doc/Creating%20a%20GUI-based%20macOS&iOS%20ARM64%20Debugger.pdf)
