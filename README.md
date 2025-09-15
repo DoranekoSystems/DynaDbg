@@ -36,6 +36,9 @@ The httpserver starts at port `3030`.
 
 # Function
 
+- Debugger(Coming Soon)
+<img width="772" height="556" alt="screenshot" src="https://github.com/user-attachments/assets/84fe1dae-7471-48e9-be53-f0b9a35c8161" />
+
 - Memory Scan
 <img width="661" height="548" alt="screenshot" src="https://github.com/user-attachments/assets/10de5089-7496-44e6-b681-de943e711d0b" />
 
