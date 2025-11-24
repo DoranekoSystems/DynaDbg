@@ -32,18 +32,18 @@ ldid -SEntitlements.plist dbgsrv
 
 The httpserver starts at port `3030`.
 
-<img width="1512" height="1112" alt="screenshot" src="https://github.com/user-attachments/assets/35b2d9ae-4102-49f9-af44-ba2859334cda" />
+<img width="1512" height="1112" alt="screenshot" src="https://github.com/user-attachments/assets/52e88782-35f7-4294-b0d7-48b3f2b8b6cb" />
 
 # Function
 
 - Debugger
-<img width="772" height="556" alt="screenshot" src="https://github.com/user-attachments/assets/84fe1dae-7471-48e9-be53-f0b9a35c8161" />
+<img width="906" height="556" alt="screenshot" src="https://github.com/user-attachments/assets/75aef088-e588-4128-ae21-5401cd3a8610" />
 
 - Memory Scan
-<img width="661" height="548" alt="screenshot" src="https://github.com/user-attachments/assets/10de5089-7496-44e6-b681-de943e711d0b" />
+<img width="756" height="556" alt="screenshot" src="https://github.com/user-attachments/assets/a1a08b57-2cc6-43c4-b7d1-c17d1b176bc3" />
 
 - Hardware Watchpoint
-<img width="500" height="356" alt="screenshot" src="https://github.com/user-attachments/assets/15a068cb-e77b-408e-a9e5-2d5482c5adbf" />
+<img width="556" height="356" alt="screenshot" src="https://github.com/user-attachments/assets/d4aa5a0a-4a71-4ed8-8160-801d6f92a265" />
 
 ## Documentation
 
