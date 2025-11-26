@@ -1,5 +1,5 @@
 # DynaDbg
-Next-Generation Remote Analysis Suite for iOS.  
+Next-Generation Remote Analysis Suite for Reverse Engineering.  
 This project is not open source and remains under private development!
 
 # Support OS
@@ -32,19 +32,22 @@ ldid -SEntitlements.plist dbgsrv
 
 The httpserver starts at port `3030`.
 
-<img width="1512" height="1112" alt="screenshot" src="https://github.com/user-attachments/assets/52e88782-35f7-4294-b0d7-48b3f2b8b6cb" />
+<img width="1512" height="1150" alt="" src="https://github.com/user-attachments/assets/114a05f5-b766-409b-98a9-4af003e64683" />
 
 # Function
 
 - Debugger
-<img width="906" height="556" alt="screenshot" src="https://github.com/user-attachments/assets/75aef088-e588-4128-ae21-5401cd3a8610" />
+<img width="756" height="575" alt="" src="https://github.com/user-attachments/assets/34d904c6-f198-4c25-92df-ce4ea448dc3c" />
 
 - Memory Scan
-<img width="756" height="556" alt="screenshot" src="https://github.com/user-attachments/assets/a1a08b57-2cc6-43c4-b7d1-c17d1b176bc3" />
+<img width="756" height="556" alt="" src="https://github.com/user-attachments/assets/4b11a095-bda5-4cc3-a4e5-536058a7853b" />
 
 - Hardware Watchpoint
 <img width="556" height="356" alt="screenshot" src="https://github.com/user-attachments/assets/d4aa5a0a-4a71-4ed8-8160-801d6f92a265" />
 
+- Code Tracing
+<img width="556" height="406" alt="" src="https://github.com/user-attachments/assets/af605005-43b4-49f1-8ee2-76a21acb71e3" />
+  
 ## Documentation
 
 For detailed technical specifications and implementation details, please refer to:
