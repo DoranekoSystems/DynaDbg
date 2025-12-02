@@ -9,7 +9,8 @@ This project is not open source and remains under private development!
 - Mac(arm64)
 
 ## Remote
-- iOS(arm64)
+- iOS(arm64)  
+- Android(arm64)
   
 # Usage
 
@@ -37,7 +38,7 @@ The httpserver starts at port `3030`.
 # Function
 
 - Debugger
-<img width="756" height="575" alt="" src="https://github.com/user-attachments/assets/34d904c6-f198-4c25-92df-ce4ea448dc3c" />
+<img width="796" height="556" alt="" src="https://github.com/user-attachments/assets/12d5f41b-78e4-414a-a01c-ef1faec073da" />
 
 - Memory Scan
 <img width="756" height="556" alt="" src="https://github.com/user-attachments/assets/4b11a095-bda5-4cc3-a4e5-536058a7853b" />
