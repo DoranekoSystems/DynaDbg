@@ -54,6 +54,8 @@ The httpserver starts at port `3030`.
 For detailed technical specifications and implementation details, please refer to:
 - [Creating a GUI-based macOS&iOS ARM64 Debugger.pdf](doc/Creating%20a%20GUI-based%20macOS&iOS%20ARM64%20Debugger.pdf)
 
-## License
+## Credits
 
-[MachOKit](https://github.com/p-x9/MachOKit)
+This project uses the following open source libraries:
+
+* [MachOKit](https://github.com/p-x9/MachOKit) by [p-x9](https://github.com/p-x9) - MIT License
