@@ -38,13 +38,11 @@ This game is designed to verify the following debugging capabilities:
 
 ### Using GitHub Actions (Recommended)
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/DoranekoSystems/DynaDbg.git
-   cd DynaDbg
-   ```
+1. Fork the repository on GitHub:
+   - Go to https://github.com/DoranekoSystems/DynaDbg
+   - Click **Fork** button
 
-2. Go to **Actions** tab on GitHub
+2. Go to **Actions** tab on your forked repository
 
 3. Select **Build Benchmarks** workflow
 
