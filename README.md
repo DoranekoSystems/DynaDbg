@@ -6,11 +6,13 @@ This project is not open source and remains under private development!
 
 ## Host
 - Windows(x86_64)
+- Linux(x86_64)
 - Mac(arm64)
 
 ## Remote
 - iOS(arm64)  
 - Android(arm64)
+- Linux(x86_64)
   
 # Usage
 

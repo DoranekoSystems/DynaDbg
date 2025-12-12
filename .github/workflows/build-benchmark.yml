@@ -1,0 +1,179 @@
+name: Build Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Platform toggles
+      linux_x86_64:
+        description: 'Build for Linux x86_64'
+        type: boolean
+        default: true
+      android_arm64:
+        description: 'Build for Android arm64'
+        type: boolean
+        default: true
+      # Benchmark toggles
+      shooting_game:
+        description: 'Build shooting_game benchmark'
+        type: boolean
+        default: true
+
+  push:
+    paths:
+      - 'benchmark/**'
+      - '.github/workflows/build-benchmark.yml'
+
+  pull_request:
+    paths:
+      - 'benchmark/**'
+      - '.github/workflows/build-benchmark.yml'
+
+env:
+  # Default values for push/pull_request triggers
+  DEFAULT_LINUX_X86_64: true
+  DEFAULT_ANDROID_ARM64: true
+  DEFAULT_SHOOTING_GAME: true
+
+jobs:
+  # ============================================================================
+  # Linux x86_64 Build
+  # ============================================================================
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'workflow_dispatch' && inputs.linux_x86_64) ||
+      (github.event_name != 'workflow_dispatch')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev
+
+      - name: Build shooting_game
+        if: >
+          (github.event_name == 'workflow_dispatch' && inputs.shooting_game) ||
+          (github.event_name != 'workflow_dispatch')
+        working-directory: benchmark/shooting_game
+        run: |
+          make clean || true
+          make
+          file shooting_game
+
+      - name: Upload Linux x86_64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-linux-x86_64
+          path: |
+            benchmark/shooting_game/shooting_game
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ============================================================================
+  # Android arm64 Build
+  # ============================================================================
+  android-arm64:
+    name: Android arm64
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'workflow_dispatch' && inputs.android_arm64) ||
+      (github.event_name != 'workflow_dispatch')
+
+    env:
+      NDK_VERSION: r26b
+      API_LEVEL: 24
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          echo "NDK_ROOT=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      - name: Build ncurses for Android arm64
+        run: |
+          # Download and build ncurses for Android
+          wget -q https://ftp.gnu.org/gnu/ncurses/ncurses-6.4.tar.gz
+          tar xzf ncurses-6.4.tar.gz
+          cd ncurses-6.4
+          
+          export TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
+          export TARGET=aarch64-linux-android
+          export CC=$TOOLCHAIN/bin/${TARGET}${{ env.API_LEVEL }}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET}${{ env.API_LEVEL }}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          
+          ./configure \
+            --host=$TARGET \
+            --prefix=$PWD/../ncurses-android \
+            --without-debug \
+            --without-ada \
+            --without-tests \
+            --without-manpages \
+            --with-shared=no \
+            --with-static=yes \
+            --enable-widec
+          
+          make -j$(nproc)
+          make install
+          
+          echo "NCURSES_ROOT=$PWD/../ncurses-android" >> $GITHUB_ENV
+
+      - name: Build shooting_game for Android arm64
+        if: >
+          (github.event_name == 'workflow_dispatch' && inputs.shooting_game) ||
+          (github.event_name != 'workflow_dispatch')
+        working-directory: benchmark/shooting_game
+        run: |
+          export TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
+          export TARGET=aarch64-linux-android
+          export CC=$TOOLCHAIN/bin/${TARGET}${{ env.API_LEVEL }}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET}${{ env.API_LEVEL }}-clang++
+          
+          $CXX -g -O0 -std=c++17 \
+            -I$NCURSES_ROOT/include \
+            -I$NCURSES_ROOT/include/ncursesw \
+            -L$NCURSES_ROOT/lib \
+            -static \
+            -o shooting_game_android \
+            shooting_game.cpp \
+            -lncursesw -lpthread
+          
+          file shooting_game_android
+
+      - name: Upload Android arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-android-arm64
+          path: |
+            benchmark/shooting_game/shooting_game_android
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ============================================================================
+  # Summary
+  # ============================================================================
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [linux-x86_64, android-arm64]
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          echo "## Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux x86_64 | ${{ needs.linux-x86_64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Android arm64 | ${{ needs.android-arm64.result }} |" >> $GITHUB_STEP_SUMMARY
