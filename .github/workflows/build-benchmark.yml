@@ -117,6 +117,7 @@ jobs:
           export CC=$TOOLCHAIN/bin/${TARGET}${{ env.API_LEVEL }}-clang
           export CXX=$TOOLCHAIN/bin/${TARGET}${{ env.API_LEVEL }}-clang++
           
+          # Note: Android bionic libc includes pthread, no need to link -lpthread
           $CXX -g -O0 -std=c++17 \
             -I$NCURSES_ROOT/include \
             -I$NCURSES_ROOT/include/ncursesw \
@@ -124,7 +125,7 @@ jobs:
             -static \
             -o shooting_game_android \
             shooting_game.cpp \
-            -lncursesw -lpthread
+            -lncursesw
           
           file shooting_game_android
 
