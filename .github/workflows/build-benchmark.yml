@@ -18,22 +18,6 @@ on:
         type: boolean
         default: true
 
-  push:
-    paths:
-      - 'benchmark/**'
-      - '.github/workflows/build-benchmark.yml'
-
-  pull_request:
-    paths:
-      - 'benchmark/**'
-      - '.github/workflows/build-benchmark.yml'
-
-env:
-  # Default values for push/pull_request triggers
-  DEFAULT_LINUX_X86_64: true
-  DEFAULT_ANDROID_ARM64: true
-  DEFAULT_SHOOTING_GAME: true
-
 jobs:
   # ============================================================================
   # Linux x86_64 Build
@@ -41,9 +25,7 @@ jobs:
   linux-x86_64:
     name: Linux x86_64
     runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'workflow_dispatch' && inputs.linux_x86_64) ||
-      (github.event_name != 'workflow_dispatch')
+    if: inputs.linux_x86_64
 
     steps:
       - name: Checkout repository
@@ -55,9 +37,7 @@ jobs:
           sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev
 
       - name: Build shooting_game
-        if: >
-          (github.event_name == 'workflow_dispatch' && inputs.shooting_game) ||
-          (github.event_name != 'workflow_dispatch')
+        if: inputs.shooting_game
         working-directory: benchmark/shooting_game
         run: |
           make clean || true
@@ -79,9 +59,7 @@ jobs:
   android-arm64:
     name: Android arm64
     runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'workflow_dispatch' && inputs.android_arm64) ||
-      (github.event_name != 'workflow_dispatch')
+    if: inputs.android_arm64
 
     env:
       NDK_VERSION: r26b
@@ -111,6 +89,7 @@ jobs:
           export CXX=$TOOLCHAIN/bin/${TARGET}${{ env.API_LEVEL }}-clang++
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
           
           ./configure \
             --host=$TARGET \
@@ -119,6 +98,7 @@ jobs:
             --without-ada \
             --without-tests \
             --without-manpages \
+            --without-progs \
             --with-shared=no \
             --with-static=yes \
             --enable-widec
@@ -129,9 +109,7 @@ jobs:
           echo "NCURSES_ROOT=$PWD/../ncurses-android" >> $GITHUB_ENV
 
       - name: Build shooting_game for Android arm64
-        if: >
-          (github.event_name == 'workflow_dispatch' && inputs.shooting_game) ||
-          (github.event_name != 'workflow_dispatch')
+        if: inputs.shooting_game
         working-directory: benchmark/shooting_game
         run: |
           export TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
