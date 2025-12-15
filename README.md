@@ -40,7 +40,7 @@ The httpserver starts at port `3030`.
 # Function
 
 - Debugger
-<img width="796" height="556" alt="" src="https://github.com/user-attachments/assets/12d5f41b-78e4-414a-a01c-ef1faec073da" />
+<img width="796" height="556" alt="" src="https://github.com/user-attachments/assets/98d831f4-7c0b-44a1-8310-f2f73599927e" />
 
 - Memory Scan
 <img width="756" height="556" alt="" src="https://github.com/user-attachments/assets/4b11a095-bda5-4cc3-a4e5-536058a7853b" />
@@ -49,8 +49,8 @@ The httpserver starts at port `3030`.
 <img width="556" height="356" alt="screenshot" src="https://github.com/user-attachments/assets/d4aa5a0a-4a71-4ed8-8160-801d6f92a265" />
 
 - Code Tracing
-<img width="556" height="406" alt="" src="https://github.com/user-attachments/assets/af605005-43b4-49f1-8ee2-76a21acb71e3" />
-  
+<img width="800" height="600" alt="" src="https://github.com/user-attachments/assets/2ee34e74-2b39-4130-908d-3283d0063a6d" />
+
 ## Documentation
 
 For detailed technical specifications and implementation details, please refer to:
