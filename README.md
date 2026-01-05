@@ -1,7 +1,15 @@
 # DynaDbg
-Next-Generation Remote Analysis Suite for Reverse Engineering.  
-This project is not open source and remains under private development!
+Next-Generation Remote Analysis Suite for Reverse Engineering.
 
+> **Motivation**
+> Curiosity — nothing more.
+> *This project is driven purely by a desire to explore and understand how low-level execution behaves across different systems.*
+>
+> **Goal**
+> To visualize low-level execution across multiple operating systems and architectures, assisting reverse engineering analysis and deepening technical understanding.
+
+**⚠️ Project Status**
+This project is **not open source** and remains under **private development**.
 # Support OS
 
 ## Host
