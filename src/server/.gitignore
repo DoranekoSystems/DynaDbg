@@ -1,0 +1,14 @@
+.DS_Store
+
+target
+
+build/NDK/arm64
+build/NDK/arm
+build/NDK/x86
+build
+libdbgsrv_native.*
+
+vc140.pdb
+.build-xcode
+.build-xcode-macos
+.build-xcode-ios
