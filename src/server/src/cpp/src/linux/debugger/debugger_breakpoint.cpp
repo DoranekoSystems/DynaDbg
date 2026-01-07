@@ -587,9 +587,9 @@ int Debugger::handle_breakpoint_hit(pid_t thread, int breakpoint_index)
 #elif defined(__x86_64__)
         // x86_64: Temporarily disable the breakpoint
         unsigned long dr7 =
-            ptrace((__ptrace_request)PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
+            PTRACE_CALL(PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
         dr7 &= ~(1UL << (actual_index * 2));  // Clear local enable bit
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7) == -1)
         {
             debug_log(LOG_ERROR, "Failed to disable breakpoint for tracing: %s", strerror(errno));
         }
@@ -678,7 +678,7 @@ bool Debugger::apply_breakpoint_to_threads(const std::vector<pid_t>& threads, in
         }
 #elif defined(__x86_64__)
         // x86_64: Use debug registers DR0-DR3 for breakpoints
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) ==
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) ==
             -1)
         {
             int err = errno;
@@ -692,7 +692,7 @@ bool Debugger::apply_breakpoint_to_threads(const std::vector<pid_t>& threads, in
         }
 
         // Configure DR7 for execution breakpoint
-        unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
+        unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
 
         // Set local enable bit
         dr7 |= (1UL << (index * 2));
@@ -702,7 +702,7 @@ bool Debugger::apply_breakpoint_to_threads(const std::vector<pid_t>& threads, in
         dr7 &= ~(0xFUL << shift);
         dr7 |= ((X86_DR7_BREAK_ON_EXEC | (X86_DR7_LEN_1 << 2)) << shift);
 
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
         {
             int err = errno;
             if (err == ESRCH)
@@ -745,20 +745,20 @@ bool Debugger::apply_breakpoint_to_thread(pid_t tid, int index, uint64_t address
         return false;
     }
 #elif defined(__x86_64__)
-    if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) == -1)
+    if (PTRACE_CALL(PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) == -1)
     {
         debug_log(LOG_ERROR, "Failed to set breakpoint address for thread %d: %s", tid,
                   strerror(errno));
         return false;
     }
 
-    unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
+    unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
     dr7 |= (1UL << (index * 2));
     int shift = 16 + index * 4;
     dr7 &= ~(0xFUL << shift);
     dr7 |= ((X86_DR7_BREAK_ON_EXEC | (X86_DR7_LEN_1 << 2)) << shift);
 
-    if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
+    if (PTRACE_CALL(PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
     {
         debug_log(LOG_ERROR, "Failed to set DR7 for thread %d: %s", tid, strerror(errno));
         return false;
@@ -822,7 +822,7 @@ bool Debugger::clear_breakpoint_from_threads(const std::vector<pid_t>& threads, 
         }
 #elif defined(__x86_64__)
         // x86_64: Clear the debug register for this breakpoint
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)0) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)0) == -1)
         {
             int err = errno;
             if (err == ESRCH)
@@ -835,13 +835,13 @@ bool Debugger::clear_breakpoint_from_threads(const std::vector<pid_t>& threads, 
         }
 
         // Clear enable bit in DR7
-        unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
+        unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
         dr7 &= ~(1UL << (index * 2));  // Clear local enable bit
         // Clear condition and length bits
         int shift = 16 + index * 4;
         dr7 &= ~(0xFUL << shift);
 
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
         {
             int err = errno;
             if (err == ESRCH)

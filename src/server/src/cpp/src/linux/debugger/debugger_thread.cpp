@@ -430,7 +430,7 @@ bool Debugger::verify_threads_stopped(std::vector<pid_t>& threads_to_verify)
 #elif defined(__x86_64__)
         // x86_64: Try to access debug registers
         errno = 0;
-        ptrace((__ptrace_request)PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
+        PTRACE_CALL(PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
         if (errno != 0)
         {
             it = threads_to_verify.erase(it);

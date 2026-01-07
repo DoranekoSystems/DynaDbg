@@ -296,7 +296,7 @@ int Debugger::handle_watchpoint_hit(pid_t thread, int watchpoint_index)
     }
 #elif defined(__x86_64__)
     // x86_64: Temporarily disable the watchpoint using debug registers
-    unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
+    unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
 
     // Store original DR7 for restoration
     {
@@ -307,7 +307,7 @@ int Debugger::handle_watchpoint_hit(pid_t thread, int watchpoint_index)
 
     // Clear local enable bit for this watchpoint
     dr7 &= ~(1UL << (watchpoint_index * 2));
-    if (ptrace((__ptrace_request)PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7) == -1)
+    if (PTRACE_CALL(PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7) == -1)
     {
         debug_log(LOG_ERROR, "Failed to disable watchpoint %d for thread %d: %s", watchpoint_index,
                   thread, strerror(errno));
@@ -417,7 +417,7 @@ bool Debugger::apply_watchpoint_to_threads(const std::vector<pid_t>& threads, in
 #elif defined(__x86_64__)
         // x86_64: Use debug registers DR0-DR3 for watchpoints
         // Set the address in DR0-DR3 (index)
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) ==
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) ==
             -1)
         {
             int err = errno;
@@ -431,7 +431,7 @@ bool Debugger::apply_watchpoint_to_threads(const std::vector<pid_t>& threads, in
         }
 
         // Configure DR7
-        unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
+        unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
 
         // Determine length encoding for x86_64
         int x86_len;
@@ -468,7 +468,7 @@ bool Debugger::apply_watchpoint_to_threads(const std::vector<pid_t>& threads, in
         dr7 &= ~(0xFUL << shift);
         dr7 |= ((x86_cond | (x86_len << 2)) << shift);
 
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
         {
             int err = errno;
             if (err == ESRCH)
@@ -536,14 +536,14 @@ bool Debugger::apply_watchpoint_to_thread(pid_t tid, int index, uint64_t address
         return false;
     }
 #elif defined(__x86_64__)
-    if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) == -1)
+    if (PTRACE_CALL(PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)address) == -1)
     {
         debug_log(LOG_ERROR, "Failed to set watchpoint address for thread %d: %s", tid,
                   strerror(errno));
         return false;
     }
 
-    unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
+    unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
 
     uint32_t x86_len;
     if (size <= 1)
@@ -573,7 +573,7 @@ bool Debugger::apply_watchpoint_to_thread(pid_t tid, int index, uint64_t address
     dr7 &= ~(0xFUL << shift);
     dr7 |= ((x86_type | (x86_len << 2)) << shift);
 
-    if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
+    if (PTRACE_CALL(PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
     {
         debug_log(LOG_ERROR, "Failed to set DR7 for watchpoint on thread %d: %s", tid,
                   strerror(errno));
@@ -626,7 +626,7 @@ bool Debugger::clear_watchpoint_from_threads(const std::vector<pid_t>& threads, 
         }
 #elif defined(__x86_64__)
         // x86_64: Clear the debug register for this watchpoint
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)0) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, x86_dr_offset(index), (void*)0) == -1)
         {
             int err = errno;
             if (err == ESRCH)
@@ -639,13 +639,13 @@ bool Debugger::clear_watchpoint_from_threads(const std::vector<pid_t>& threads, 
         }
 
         // Clear enable bit in DR7
-        unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
+        unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, tid, X86_DR7_OFFSET, nullptr);
         dr7 &= ~(1UL << (index * 2));  // Clear local enable bit
         // Clear condition and length bits
         int shift = 16 + index * 4;
         dr7 &= ~(0xFUL << shift);
 
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, tid, X86_DR7_OFFSET, (void*)dr7) == -1)
         {
             int err = errno;
             if (err == ESRCH)

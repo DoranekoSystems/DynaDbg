@@ -156,7 +156,7 @@ int Debugger::handle_exception(pid_t pid, int status)
                 (void)has_fault_address;  // Unused on x86_64, suppress warning
                 errno = 0;                // Clear errno before PTRACE_PEEKUSER
                 unsigned long dr6 =
-                    ptrace((__ptrace_request)PTRACE_PEEKUSER, pid, X86_DR6_OFFSET, nullptr);
+                    PTRACE_CALL(PTRACE_PEEKUSER, pid, X86_DR6_OFFSET, nullptr);
                 if (errno == 0)
                 {
                     std::lock_guard<std::mutex> lock(watchpoint_data_mutex_);
@@ -174,7 +174,7 @@ int Debugger::handle_exception(pid_t pid, int status)
                     // Clear DR6 after reading to prepare for next watchpoint
                     if (watchpoint_hit)
                     {
-                        ptrace((__ptrace_request)PTRACE_POKEUSER, pid, X86_DR6_OFFSET, (void*)0);
+                        PTRACE_CALL(PTRACE_POKEUSER, pid, X86_DR6_OFFSET, (void*)0);
                     }
                 }
 #elif defined(__aarch64__)
@@ -912,10 +912,10 @@ int Debugger::single_step_internal(pid_t thread_id)
 #elif defined(__x86_64__)
         // x86_64: Disable hardware breakpoint by clearing DR7 enable bits
         unsigned long dr7 =
-            ptrace((__ptrace_request)PTRACE_PEEKUSER, thread_id, X86_DR7_OFFSET, nullptr);
+            PTRACE_CALL(PTRACE_PEEKUSER, thread_id, X86_DR7_OFFSET, nullptr);
         // Clear local enable bit for this breakpoint
         dr7 &= ~(1UL << (bp_index * 2));
-        if (ptrace((__ptrace_request)PTRACE_POKEUSER, thread_id, X86_DR7_OFFSET, (void*)dr7) == -1)
+        if (PTRACE_CALL(PTRACE_POKEUSER, thread_id, X86_DR7_OFFSET, (void*)dr7) == -1)
         {
             debug_log(LOG_ERROR, "Failed to disable breakpoint %d for single step: %s", bp_index,
                       strerror(errno));
@@ -1116,10 +1116,10 @@ int Debugger::continue_breakpoint_single_step(pid_t thread)
 #elif defined(__x86_64__)
         // x86_64: Clear the hardware breakpoint
         unsigned long dr7 =
-            ptrace((__ptrace_request)PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
+            PTRACE_CALL(PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
         dr7 &= ~(1UL << (bp_index * 2));  // Clear local enable bit
-        ptrace((__ptrace_request)PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7);
-        ptrace((__ptrace_request)PTRACE_POKEUSER, thread, x86_dr_offset(bp_index), (void*)0);
+        PTRACE_CALL(PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7);
+        PTRACE_CALL(PTRACE_POKEUSER, thread, x86_dr_offset(bp_index), (void*)0);
 #endif
 
         // Clean up thread state
@@ -1189,13 +1189,13 @@ int Debugger::continue_breakpoint_single_step(pid_t thread)
     }
 #elif defined(__x86_64__)
     // x86_64: Re-enable the hardware breakpoint
-    unsigned long dr7 = ptrace((__ptrace_request)PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
+    unsigned long dr7 = PTRACE_CALL(PTRACE_PEEKUSER, thread, X86_DR7_OFFSET, nullptr);
     dr7 |= (1UL << (bp_index * 2));  // Set local enable bit
     // Set condition (execution) and length (1 byte for exec)
     int shift = 16 + bp_index * 4;
     dr7 &= ~(0xFUL << shift);
     dr7 |= ((X86_DR7_BREAK_ON_EXEC | (X86_DR7_LEN_1 << 2)) << shift);
-    ptrace((__ptrace_request)PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7);
+    PTRACE_CALL(PTRACE_POKEUSER, thread, X86_DR7_OFFSET, (void*)dr7);
 #endif
 
     // Re-insert software breakpoint if it was temporarily removed
