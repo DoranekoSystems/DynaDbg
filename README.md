@@ -30,6 +30,11 @@ Next-Generation Remote Analysis Suite for Reverse Engineering.
 
 Please refer to the [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/Using-DynaDbg) for detailed usage instructions.
 
+# Building
+
+Fork this repository and run the **Build DynaDbg** workflow from the Actions tab to build the application.  
+See [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/GitHub-Actions) for detailed build options.
+
 # Developing
 
 Please refer to the [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/Developing-DynaDbg) for development setup and guidelines.

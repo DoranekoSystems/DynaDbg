@@ -1,0 +1,413 @@
+name: Build DynaDbg
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g., v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+      # Host builds
+      build_host_macos:
+        description: "Build macOS Host App"
+        type: boolean
+        default: true
+      build_host_windows:
+        description: "Build Windows Host App"
+        type: boolean
+        default: true
+      build_host_linux:
+        description: "Build Linux Host App"
+        type: boolean
+        default: true
+
+      # Server builds
+      build_server_android:
+        description: "Build Android Server (arm64)"
+        type: boolean
+        default: true
+      build_server_linux:
+        description: "Build Linux Server (x86_64)"
+        type: boolean
+        default: false
+
+      # macOS options
+      notarize_macos:
+        description: "Notarize macOS App (requires signing secrets)"
+        type: boolean
+        default: false
+
+jobs:
+  # ============================================
+  # macOS Host
+  # ============================================
+  build-macos:
+    if: ${{ github.event.inputs.build_host_macos == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Xcode version
+        run: |
+          LATEST_XCODE=$(ls -1 /Applications | grep -E '^Xcode.*\.app$' | sort -V | tail -1)
+          [ -n "$LATEST_XCODE" ] && sudo xcode-select --switch "/Applications/$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: src/client/package-lock.json
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Add Rust target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: cd src/client && npm install
+
+      - name: Update version
+        run: |
+          VERSION_NUM=$(echo "${{ github.event.inputs.version }}" | sed 's/^v//')
+          cd src/client
+          sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION_NUM\"/" src-tauri/tauri.conf.json
+          sed -i '' "s/^version = \"[^\"]*\"/version = \"$VERSION_NUM\"/" src-tauri/Cargo.toml
+
+      - name: Setup Tauri CLI
+        run: command -v cargo-tauri &> /dev/null || cargo install tauri-cli --version "^1.0"
+
+      - name: Import Code Signing Certificate
+        if: ${{ github.event.inputs.notarize_macos == 'true' }}
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+          security import certificate.p12 -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+      - name: Setup Notarization Credentials
+        if: ${{ github.event.inputs.notarize_macos == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool store-credentials "notarytool-profile" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_ID_PASSWORD"
+
+      - name: Build macOS App
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          cd src/client
+          if [ "${{ github.event.inputs.notarize_macos }}" = "true" ]; then
+            export APPLE_CERTIFICATE_IDENTITY="$APPLE_SIGNING_IDENTITY"
+            npm run tauri build -- --target aarch64-apple-darwin --bundles app
+          else
+            npm run tauri build -- --target aarch64-apple-darwin
+          fi
+
+      - name: Sign and Notarize
+        if: ${{ github.event.inputs.notarize_macos == 'true' }}
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          APP_PATH=$(find src/client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -name "*.app" -type d | head -1)
+          APP_NAME=$(basename "$APP_PATH" .app)
+
+          cat > entitlements.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+              <key>com.apple.security.cs.disable-library-validation</key><true/>
+              <key>com.apple.security.network.client</key><true/>
+              <key>com.apple.security.network.server</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+          xattr -cr "$APP_PATH"
+          codesign --force --deep --sign "$APPLE_SIGNING_IDENTITY" --options runtime --entitlements entitlements.plist --timestamp "$APP_PATH"
+          ditto -c -k --keepParent "$APP_PATH" "${APP_NAME}.zip"
+          xcrun notarytool submit "${APP_NAME}.zip" --keychain-profile "notarytool-profile" --wait
+          xcrun stapler staple "$APP_PATH"
+
+          hdiutil create -volname "$APP_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "${APP_NAME}.dmg"
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" "${APP_NAME}.dmg"
+          xcrun notarytool submit "${APP_NAME}.dmg" --keychain-profile "notarytool-profile" --wait
+          xcrun stapler staple "${APP_NAME}.dmg"
+
+      - name: Package macOS App
+        run: |
+          mkdir -p release/macos
+          if [ "${{ github.event.inputs.notarize_macos }}" = "true" ]; then
+            APP_PATH=$(find src/client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -name "*.app" -type d | head -1)
+            APP_NAME=$(basename "$APP_PATH" .app)
+            cp -r "$APP_PATH" release/macos/
+            cp "${APP_NAME}.dmg" release/macos/ 2>/dev/null || true
+          else
+            cp -r src/client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app release/macos/ 2>/dev/null || true
+            cp src/client/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release/macos/ 2>/dev/null || true
+          fi
+
+      - name: Upload macOS App
+        uses: actions/upload-artifact@v4
+        with:
+          name: dyna-dbg-macos-${{ github.event.inputs.version }}
+          path: release/macos/
+
+  # ============================================
+  # Windows Host
+  # ============================================
+  build-windows:
+    if: ${{ github.event.inputs.build_host_windows == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: src/client/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install dependencies
+        run: cd src/client && npm install
+
+      - name: Update version
+        run: |
+          $VERSION_NUM = "${{ github.event.inputs.version }}" -replace '^v', ''
+          $tauriConf = Get-Content "src/client/src-tauri/tauri.conf.json" -Raw
+          $tauriConf = $tauriConf -replace '"version": "[^"]*"', """version"": ""$VERSION_NUM"""
+          Set-Content "src/client/src-tauri/tauri.conf.json" $tauriConf -NoNewline
+          $cargoToml = Get-Content "src/client/src-tauri/Cargo.toml" -Raw
+          $cargoToml = $cargoToml -replace '(?m)^version = "[^"]*"', "version = ""$VERSION_NUM"""
+          Set-Content "src/client/src-tauri/Cargo.toml" $cargoToml -NoNewline
+
+      - name: Setup Tauri CLI
+        run: |
+          if (-not (Test-Path "$env:USERPROFILE\.cargo\bin\cargo-tauri.exe")) {
+            cargo install tauri-cli --version "^1.0"
+          }
+
+      - name: Build Windows App
+        run: cd src/client && npm run tauri build -- --target x86_64-pc-windows-msvc
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Path "release/windows" -Force
+          Get-ChildItem -Path "src/client/src-tauri/target/x86_64-pc-windows-msvc/release" -Filter "*.exe" | Where-Object { $_.Name -notlike "*-setup.exe" } | ForEach-Object { Copy-Item $_.FullName "release/windows/" }
+          Get-ChildItem -Path "src/client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*-setup.exe" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "release/windows/" }
+          Get-ChildItem -Path "src/client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "release/windows/" }
+
+      - name: Upload Windows App
+        uses: actions/upload-artifact@v4
+        with:
+          name: dyna-dbg-windows-${{ github.event.inputs.version }}
+          path: release/windows/
+
+  # ============================================
+  # Linux Host
+  # ============================================
+  build-linux-host:
+    if: ${{ github.event.inputs.build_host_linux == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update && sudo apt install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget libssl-dev \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: src/client/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install dependencies
+        run: cd src/client && npm install
+
+      - name: Update version
+        run: |
+          VERSION_NUM=$(echo "${{ github.event.inputs.version }}" | sed 's/^v//')
+          cd src/client
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION_NUM\"/" src-tauri/tauri.conf.json
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION_NUM\"/" src-tauri/Cargo.toml
+
+      - name: Setup Tauri CLI
+        run: command -v cargo-tauri &> /dev/null || cargo install tauri-cli --version "^1.0"
+
+      - name: Build Linux App
+        run: cd src/client && npm run tauri build -- --target x86_64-unknown-linux-gnu
+
+      - name: Package
+        run: |
+          mkdir -p release/linux
+          find src/client/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -name "*.AppImage" -exec cp {} release/linux/ \; 2>/dev/null || true
+          find src/client/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb -name "*.deb" -exec cp {} release/linux/ \; 2>/dev/null || true
+          find src/client/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm -name "*.rpm" -exec cp {} release/linux/ \; 2>/dev/null || true
+
+      - name: Upload Linux App
+        uses: actions/upload-artifact@v4
+        with:
+          name: dyna-dbg-linux-${{ github.event.inputs.version }}
+          path: release/linux/
+
+  # ============================================
+  # Android Server (arm64)
+  # ============================================
+  build-server-android:
+    if: ${{ github.event.inputs.build_server_android == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-server-${{ hashFiles('src/server/Cargo.lock') }}
+
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/android-sdk
+          key: android-ndk-26.1.10909125
+
+      - name: Install Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          ANDROID_SDK_ROOT=$HOME/android-sdk
+          mkdir -p $ANDROID_SDK_ROOT
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d $ANDROID_SDK_ROOT
+          mv $ANDROID_SDK_ROOT/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools-latest
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          mv $ANDROID_SDK_ROOT/cmdline-tools-latest $ANDROID_SDK_ROOT/cmdline-tools/latest
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "ndk;26.1.10909125"
+
+      - name: Setup environment
+        run: |
+          ANDROID_SDK_ROOT=$HOME/android-sdk
+          NDK_PATH=$ANDROID_SDK_ROOT/ndk/26.1.10909125
+          TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/bin/aarch64-linux-android24-clang" >> $GITHUB_ENV
+          echo "CXX_aarch64_linux_android=$TOOLCHAIN/bin/aarch64-linux-android24-clang++" >> $GITHUB_ENV
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/bin/aarch64-linux-android24-clang" >> $GITHUB_ENV
+          echo "TARGET_CC=$TOOLCHAIN/bin/aarch64-linux-android24-clang" >> $GITHUB_ENV
+          echo "TARGET_CXX=$TOOLCHAIN/bin/aarch64-linux-android24-clang++" >> $GITHUB_ENV
+          echo "TARGET_AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+
+      - name: Add Rust target
+        run: rustup target add aarch64-linux-android
+
+      - name: Build Android Server
+        run: cd src/server && cargo build --target=aarch64-linux-android --release
+
+      - name: Package
+        run: |
+          mkdir -p release/android
+          cp src/server/target/aarch64-linux-android/release/dbgsrv release/android/
+          LIBCPP=$(find $ANDROID_NDK_HOME -name "libc++_shared.so" -path "*aarch64*" | head -1)
+          [ -n "$LIBCPP" ] && cp "$LIBCPP" release/android/
+
+      - name: Upload Android Server
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbgsrv-android-${{ github.event.inputs.version }}
+          path: release/android/
+
+  # ============================================
+  # Linux Server (x86_64)
+  # ============================================
+  build-server-linux:
+    if: ${{ github.event.inputs.build_server_linux == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt update && sudo apt install -y build-essential libssl-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-server-${{ hashFiles('src/server/Cargo.lock') }}
+
+      - name: Build Linux Server
+        run: cd src/server && cargo build --target=x86_64-unknown-linux-gnu --release
+
+      - name: Upload Linux Server
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbgsrv-linux-x86_64-${{ github.event.inputs.version }}
+          path: src/server/target/x86_64-unknown-linux-gnu/release/dbgsrv
