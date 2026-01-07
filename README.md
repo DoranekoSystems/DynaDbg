@@ -4,7 +4,8 @@ Next-Generation Remote Analysis Suite for Reverse Engineering.
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 > 🎉 **Open Source Announcement (2026/01/07)**  
-> This project is now open source! Contributions are welcome — feel free to submit pull requests!
+> This project is now open source!  
+> ⚠️ **Note:** I am currently not accepting pull requests while I work on code reorganization. Please also refrain from posting code suggestions in Issues. Thank you for your understanding.
 
 > **Motivation**
 > Curiosity — nothing more.
@@ -27,46 +28,13 @@ Next-Generation Remote Analysis Suite for Reverse Engineering.
   
 # Usage
 
-## Android
+Please refer to the [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/Using-DynaDbg) for detailed usage instructions.
 
-### Run
+# Developing
 
-Place your PC and Android device on the same network.  
-Push `dbgsrv` and `libc++_shared.so` to the device.
+Please refer to the [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/Developing-DynaDbg) for development setup and guidelines.
 
-> **Note:** Please place the bundled `libc++_shared.so` from NDK in the same folder as `dbgsrv`.  
-> Location: `$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/<platform>/sysroot/usr/lib/<arch>/libc++_shared.so`
-
-```sh
-adb push dbgsrv /data/local/tmp/
-adb push libc++_shared.so /data/local/tmp/
-adb shell
-cd /data/local/tmp
-chmod +x dbgsrv
-./dbgsrv
-```
-
-The HTTP server starts at port `3030`.
-
-## iOS
-
-### Run
-
-#### with a Jailbroken iPhone
-
-Place your PC and iPhone on the same network.  
-Place `dbgsrv` and `Entitlements.plist` in `/usr/bin`.
-
-Connect to the iPhone via SSH.
-
-```sh
-cd /usr/bin
-ldid -SEntitlements.plist dbgsrv
-./dbgsrv
-```
-
-The HTTP server starts at port `3030`.
-
+# Screenshot
 <img width="1512" height="1150" alt="" src="https://github.com/user-attachments/assets/114a05f5-b766-409b-98a9-4af003e64683" />
 
 # Function
@@ -90,6 +58,7 @@ For detailed technical specifications and implementation details, please refer t
 
 ## Credits
 
-This project uses the following open source libraries:
+For a full list of dependencies, see [CREDITS.md](CREDITS.md).
 
+### Special Thanks
 * [MachOKit](https://github.com/p-x9/MachOKit) by [p-x9](https://github.com/p-x9) - MIT License
