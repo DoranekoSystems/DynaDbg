@@ -47,7 +47,15 @@ build_cpp_ios() {
     
     # Compile each .mm file
     OBJECTS=""
-    for file in "$CPP_DIR/darwin/native_api.mm" "$CPP_DIR/darwin/file_api.mm" "$CPP_DIR/darwin/debugger.mm" "$CPP_DIR/common/util.cpp"; do
+    for file in "$CPP_DIR/darwin/core/native_api.mm" "$CPP_DIR/darwin/core/file_api.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_core.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_breakpoint.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_watchpoint.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_exception.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_register.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_trace.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_native_api.mm" \
+                "$CPP_DIR/common/util.cpp"; do
         if [ -f "$file" ]; then
             basename=$(basename "$file")
             objname="${basename%.*}.o"
@@ -92,7 +100,15 @@ build_cpp_mac() {
     mkdir -p "$OUT_DIR"
     
     OBJECTS=""
-    for file in "$CPP_DIR/darwin/native_api.mm" "$CPP_DIR/darwin/file_api.mm" "$CPP_DIR/darwin/debugger.mm" "$CPP_DIR/common/util.cpp"; do
+    for file in "$CPP_DIR/darwin/core/native_api.mm" "$CPP_DIR/darwin/core/file_api.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_core.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_breakpoint.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_watchpoint.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_exception.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_register.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_trace.mm" \
+                "$CPP_DIR/darwin/debugger/debugger_native_api.mm" \
+                "$CPP_DIR/common/util.cpp"; do
         if [ -f "$file" ]; then
             basename=$(basename "$file")
             objname="${basename%.*}.o"

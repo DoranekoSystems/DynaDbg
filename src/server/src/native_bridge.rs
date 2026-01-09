@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use libc::{self, c_char, c_int, c_void};
+use libloading::{Library, Symbol};
 use serde_json::json;
 use std::ffi::{CStr, CString};
 use std::io::{BufRead, BufReader, Error};
 use std::sync::OnceLock;
-use libloading::{Library, Symbol};
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use crate::macho_bridge;
@@ -72,9 +72,18 @@ extern "C" {
     #[link_name = "enumerate_modules"]
     pub fn enumerate_modules_static(pid: i32, count: *mut usize) -> *mut ModuleInfo;
     #[link_name = "enumerate_regions_to_buffer"]
-    pub fn enumerate_regions_to_buffer_static(pid: i32, buffer: *mut u8, buffer_size: usize, include_filenames: bool);
+    pub fn enumerate_regions_to_buffer_static(
+        pid: i32,
+        buffer: *mut u8,
+        buffer_size: usize,
+        include_filenames: bool,
+    );
     #[link_name = "enumerate_regions"]
-    pub fn enumerate_regions_static(pid: i32, count: *mut usize, include_filenames: bool) -> *mut RegionInfo;
+    pub fn enumerate_regions_static(
+        pid: i32,
+        count: *mut usize,
+        include_filenames: bool,
+    ) -> *mut RegionInfo;
     #[link_name = "free_region_info"]
     pub fn free_region_info_static(regions: *mut RegionInfo, count: usize);
     #[link_name = "read_memory_native"]
@@ -130,19 +139,35 @@ extern "C" {
     #[link_name = "remove_breakpoint_native"]
     pub fn remove_breakpoint_native_static(address: usize) -> i32;
     #[link_name = "get_software_breakpoint_original_bytes_native"]
-    pub fn get_software_breakpoint_original_bytes_native_static(address: usize, out_bytes: *mut u8, out_size: *mut usize) -> bool;
+    pub fn get_software_breakpoint_original_bytes_native_static(
+        address: usize,
+        out_bytes: *mut u8,
+        out_size: *mut usize,
+    ) -> bool;
     #[link_name = "get_process_icon_native"]
     pub fn get_process_icon_native_static(pid: i32, size: *mut usize) -> *const u8;
-    #[link_name = "enum_symbols_native"]
-    pub fn enum_symbols_native_static(pid: i32, module_base: usize, count: *mut usize) -> *mut SymbolInfo;
+    #[link_name = "enumerate_symbols"]
+    pub fn enum_symbols_native_static(
+        pid: i32,
+        module_base: usize,
+        count: *mut usize,
+    ) -> *mut SymbolInfo;
     #[link_name = "continue_execution_native"]
     pub fn continue_execution_native_static(thread_id: libc::uintptr_t) -> libc::c_int;
     #[link_name = "single_step_native"]
     pub fn single_step_native_static(thread_id: libc::uintptr_t) -> libc::c_int;
     #[link_name = "read_register_native"]
-    pub fn read_register_native_static(thread_id: libc::uintptr_t, reg_name: *const c_char, value: *mut u64) -> libc::c_int;
+    pub fn read_register_native_static(
+        thread_id: libc::uintptr_t,
+        reg_name: *const c_char,
+        value: *mut u64,
+    ) -> libc::c_int;
     #[link_name = "write_register_native"]
-    pub fn write_register_native_static(thread_id: libc::uintptr_t, reg_name: *const c_char, value: u64) -> libc::c_int;
+    pub fn write_register_native_static(
+        thread_id: libc::uintptr_t,
+        reg_name: *const c_char,
+        value: u64,
+    ) -> libc::c_int;
     #[link_name = "is_in_break_state_native"]
     pub fn is_in_break_state_native_static() -> bool;
     #[link_name = "enable_trace_file_output_native"]
@@ -166,7 +191,10 @@ extern "C" {
     #[link_name = "is_script_trace_stop_requested_native"]
     pub fn is_script_trace_stop_requested_native_static() -> bool;
     #[link_name = "enable_full_memory_cache_native"]
-    pub fn enable_full_memory_cache_native_static(dump_filepath: *const c_char, log_filepath: *const c_char);
+    pub fn enable_full_memory_cache_native_static(
+        dump_filepath: *const c_char,
+        log_filepath: *const c_char,
+    );
     #[link_name = "disable_full_memory_cache_native"]
     pub fn disable_full_memory_cache_native_static();
     #[link_name = "is_full_memory_cache_enabled_native"]
@@ -176,9 +204,15 @@ extern "C" {
     #[link_name = "get_installed_apps_native"]
     pub fn get_installed_apps_native_static() -> *const c_char;
     #[link_name = "get_app_icon_native"]
-    pub fn get_app_icon_native_static(bundle_identifier: *const c_char, size: *mut usize) -> *const u8;
+    pub fn get_app_icon_native_static(
+        bundle_identifier: *const c_char,
+        size: *mut usize,
+    ) -> *const u8;
     #[link_name = "spawn_app_native"]
-    pub fn spawn_app_native_static(bundle_identifier: *const c_char, suspended: c_int) -> *const c_char;
+    pub fn spawn_app_native_static(
+        bundle_identifier: *const c_char,
+        suspended: c_int,
+    ) -> *const c_char;
     #[link_name = "terminate_app_native"]
     pub fn terminate_app_native_static(pid: c_int) -> c_int;
     #[link_name = "resume_app_native"]
@@ -190,9 +224,20 @@ extern "C" {
     #[link_name = "get_app_running_status_native"]
     pub fn get_app_running_status_native_static(bundle_identifier: *const c_char) -> *const c_char;
     #[link_name = "spawn_process_native"]
-    pub fn spawn_process_native_static(executable_path: *const c_char, args: *const *const c_char, arg_count: c_int, out_pid: *mut i32) -> c_int;
+    pub fn spawn_process_native_static(
+        executable_path: *const c_char,
+        args: *const *const c_char,
+        arg_count: c_int,
+        out_pid: *mut i32,
+    ) -> c_int;
     #[link_name = "spawn_process_with_pty"]
-    pub fn spawn_process_with_pty_static(executable_path: *const c_char, args: *const *const c_char, arg_count: c_int, out_pid: *mut i32, out_pty_fd: *mut c_int) -> c_int;
+    pub fn spawn_process_with_pty_static(
+        executable_path: *const c_char,
+        args: *const *const c_char,
+        arg_count: c_int,
+        out_pid: *mut i32,
+        out_pty_fd: *mut c_int,
+    ) -> c_int;
     #[link_name = "read_pty"]
     pub fn read_pty_static(pty_fd: c_int, buffer: *mut c_char, buffer_size: usize) -> isize;
     #[link_name = "write_pty"]
@@ -205,9 +250,18 @@ extern "C" {
     #[link_name = "set_signal_config_native"]
     pub fn set_signal_config_native_static(signal: c_int, catch_signal: bool, pass_signal: bool);
     #[link_name = "get_signal_config_native"]
-    pub fn get_signal_config_native_static(signal: c_int, catch_signal: *mut bool, pass_signal: *mut bool);
+    pub fn get_signal_config_native_static(
+        signal: c_int,
+        catch_signal: *mut bool,
+        pass_signal: *mut bool,
+    );
     #[link_name = "get_all_signal_configs_native"]
-    pub fn get_all_signal_configs_native_static(signals: *mut c_int, catch_signals: *mut bool, pass_signals: *mut bool, max_count: usize) -> usize;
+    pub fn get_all_signal_configs_native_static(
+        signals: *mut c_int,
+        catch_signals: *mut bool,
+        pass_signals: *mut bool,
+        max_count: usize,
+    ) -> usize;
     #[link_name = "remove_signal_config_native"]
     pub fn remove_signal_config_native_static(signal: c_int);
 }
@@ -226,53 +280,58 @@ type SetSendExceptionInfoCallbackFn = unsafe extern "C" fn(SendExceptionInfoFn);
 /// Initialize dynamic library loading
 /// Returns true if dynamic library was loaded successfully
 pub fn init_dynamic_library() -> bool {
-    DYNAMIC_LIB.get_or_init(|| {
-        #[cfg(target_os = "macos")]
-        let lib_name = "libdbgsrv_native.dylib";
-        
-        #[cfg(target_os = "ios")]
-        let lib_name = "libdbgsrv_native.dylib";
-        
-        #[cfg(target_os = "linux")]
-        let lib_name = "libdbgsrv_native.so";
-        
-        #[cfg(target_os = "android")]
-        let lib_name = "libdbgsrv_native.so";
-        
-        #[cfg(target_os = "windows")]
-        let lib_name = "libdbgsrv_native.dll";
-        
-        // Try loading from executable's directory first
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let lib_path = exe_dir.join(lib_name);
-                log::info!("Trying to load dynamic library from: {:?}", lib_path);
-                if let Ok(lib) = unsafe { Library::new(&lib_path) } {
-                    log::info!("Successfully loaded dynamic library from executable directory");
-                    // Set callback functions
-                    setup_dll_callbacks(&lib);
-                    return Some(lib);
-                } else {
-                    log::warn!("Failed to load from {:?}", lib_path);
+    DYNAMIC_LIB
+        .get_or_init(|| {
+            #[cfg(target_os = "macos")]
+            let lib_name = "libdbgsrv_native.dylib";
+
+            #[cfg(target_os = "ios")]
+            let lib_name = "libdbgsrv_native.dylib";
+
+            #[cfg(target_os = "linux")]
+            let lib_name = "libdbgsrv_native.so";
+
+            #[cfg(target_os = "android")]
+            let lib_name = "libdbgsrv_native.so";
+
+            #[cfg(target_os = "windows")]
+            let lib_name = "libdbgsrv_native.dll";
+
+            // Try loading from executable's directory first
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Some(exe_dir) = exe_path.parent() {
+                    let lib_path = exe_dir.join(lib_name);
+                    log::info!("Trying to load dynamic library from: {:?}", lib_path);
+                    if let Ok(lib) = unsafe { Library::new(&lib_path) } {
+                        log::info!("Successfully loaded dynamic library from executable directory");
+                        // Set callback functions
+                        setup_dll_callbacks(&lib);
+                        return Some(lib);
+                    } else {
+                        log::warn!("Failed to load from {:?}", lib_path);
+                    }
                 }
             }
-        }
-        
-        // Fall back to system library search path
-        log::info!("Trying to load dynamic library from system path: {}", lib_name);
-        match unsafe { Library::new(lib_name) } {
-            Ok(lib) => {
-                log::info!("Successfully loaded dynamic library from system path");
-                // Set callback functions
-                setup_dll_callbacks(&lib);
-                Some(lib)
+
+            // Fall back to system library search path
+            log::info!(
+                "Trying to load dynamic library from system path: {}",
+                lib_name
+            );
+            match unsafe { Library::new(lib_name) } {
+                Ok(lib) => {
+                    log::info!("Successfully loaded dynamic library from system path");
+                    // Set callback functions
+                    setup_dll_callbacks(&lib);
+                    Some(lib)
+                }
+                Err(e) => {
+                    log::warn!("Failed to load dynamic library: {}", e);
+                    None
+                }
             }
-            Err(e) => {
-                log::warn!("Failed to load dynamic library: {}", e);
-                None
-            }
-        }
-    }).is_some()
+        })
+        .is_some()
 }
 
 /// Set up callbacks from DLL to Rust
@@ -281,18 +340,23 @@ fn setup_dll_callbacks(lib: &Library) {
     match unsafe { lib.get::<SetNativeLogCallbackFn>(b"set_native_log_callback") } {
         Ok(set_log_cb) => {
             log::info!("Setting native_log callback");
-            unsafe { set_log_cb(crate::api::native_log); }
+            unsafe {
+                set_log_cb(crate::api::native_log);
+            }
         }
         Err(e) => {
             log::warn!("set_native_log_callback not found: {}", e);
         }
     }
-    
+
     // Set send_exception_info callback
-    match unsafe { lib.get::<SetSendExceptionInfoCallbackFn>(b"set_send_exception_info_callback") } {
+    match unsafe { lib.get::<SetSendExceptionInfoCallbackFn>(b"set_send_exception_info_callback") }
+    {
         Ok(set_exc_cb) => {
             log::info!("Setting send_exception_info callback");
-            unsafe { set_exc_cb(crate::api::send_exception_info); }
+            unsafe {
+                set_exc_cb(crate::api::send_exception_info);
+            }
         }
         Err(e) => {
             log::warn!("set_send_exception_info_callback not found: {}", e);
@@ -319,7 +383,7 @@ macro_rules! wrap_native_fn {
             }
         }
     };
-    
+
     ($fn_name:ident($($arg:ident: $typ:ty),*) -> $ret:ty) => {
         pub unsafe fn $fn_name($($arg: $typ),*) -> $ret {
             if let Some(Some(lib)) = DYNAMIC_LIB.get() {
@@ -440,7 +504,7 @@ pub struct ThreadInfo {
 pub struct RegionInfo {
     pub start: usize,
     pub end: usize,
-    pub protection: u32,  // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
+    pub protection: u32, // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
     pub pathname: *mut c_char,
 }
 
@@ -450,7 +514,8 @@ pub fn read_process_memory(
     size: usize,
     buffer: &mut [u8],
 ) -> Result<isize, Error> {
-    let result = unsafe { read_memory_native(pid, address as libc::uintptr_t, size, buffer.as_mut_ptr()) };
+    let result =
+        unsafe { read_memory_native(pid, address as libc::uintptr_t, size, buffer.as_mut_ptr()) };
     if result >= 0 {
         Ok(result as isize)
     } else {
@@ -487,7 +552,8 @@ pub fn write_process_memory(
     size: usize,
     buffer: &[u8],
 ) -> Result<isize, Error> {
-    let result = unsafe { write_memory_native(pid, address as libc::uintptr_t, size, buffer.as_ptr()) };
+    let result =
+        unsafe { write_memory_native(pid, address as libc::uintptr_t, size, buffer.as_ptr()) };
     if result >= 0 {
         Ok(result as isize)
     } else {
@@ -521,7 +587,12 @@ pub fn remove_watchpoint(address: usize) -> Result<i32, Error> {
     }
 }
 
-pub fn set_breakpoint(pid: i32, address: usize, hit_count: i32, is_software: bool) -> Result<i32, Error> {
+pub fn set_breakpoint(
+    pid: i32,
+    address: usize,
+    hit_count: i32,
+    is_software: bool,
+) -> Result<i32, Error> {
     let result: bool = unsafe { debugger_new(pid) };
     if !result {
         return Err(Error::new(
@@ -549,7 +620,9 @@ pub fn remove_breakpoint(address: usize) -> Result<i32, Error> {
 pub fn get_software_breakpoint_original_bytes(address: usize) -> Option<Vec<u8>> {
     let mut bytes = [0u8; 4];
     let mut size: usize = 0;
-    let result = unsafe { get_software_breakpoint_original_bytes_native(address, bytes.as_mut_ptr(), &mut size) };
+    let result = unsafe {
+        get_software_breakpoint_original_bytes_native(address, bytes.as_mut_ptr(), &mut size)
+    };
     if result && size > 0 {
         Some(bytes[..size].to_vec())
     } else {
@@ -631,28 +704,42 @@ fn enum_symbols_machokit(pid: i32, module_base: usize) -> Result<Vec<serde_json:
     // Get the module path for this base address
     let module_path = get_module_path_for_base(pid, module_base)
         .ok_or_else(|| "Could not find module path for base address".to_string())?;
-    
+
     log::debug!("MachOKit: Trying to parse module at path: {}", module_path);
-    
+
     // Check if we can parse this module with MachOKit
     if !macho_bridge::can_parse_module(&module_path) {
-        return Err(format!("Cannot parse module with MachOKit: {}", module_path));
+        return Err(format!(
+            "Cannot parse module with MachOKit: {}",
+            module_path
+        ));
     }
-    
-    log::debug!("MachOKit: can_parse_module returned true for {}", module_path);
-    
+
+    log::debug!(
+        "MachOKit: can_parse_module returned true for {}",
+        module_path
+    );
+
     // Get symbols from MachOKit
     let rebased_symbols = match macho_bridge::get_module_symbols(&module_path, module_base) {
         Ok(syms) => {
-            log::debug!("MachOKit: Successfully got {} symbols for {}", syms.len(), module_path);
+            log::debug!(
+                "MachOKit: Successfully got {} symbols for {}",
+                syms.len(),
+                module_path
+            );
             syms
         }
         Err(e) => {
-            log::debug!("MachOKit: get_module_symbols failed for {}: {}", module_path, e);
+            log::debug!(
+                "MachOKit: get_module_symbols failed for {}: {}",
+                module_path,
+                e
+            );
             return Err(e);
         }
     };
-    
+
     // Convert to JSON format
     let symbols: Vec<serde_json::Value> = rebased_symbols
         .into_iter()
@@ -674,7 +761,7 @@ fn enum_symbols_machokit(pid: i32, module_base: usize) -> Result<Vec<serde_json:
             })
         })
         .collect();
-    
+
     if symbols.is_empty() {
         Err("No symbols found via MachOKit".to_string())
     } else {
@@ -683,7 +770,10 @@ fn enum_symbols_machokit(pid: i32, module_base: usize) -> Result<Vec<serde_json:
 }
 
 /// Enumerate symbols using native C++ implementation (fallback)
-fn enum_symbols_native_impl(pid: i32, module_base: usize) -> Result<Vec<serde_json::Value>, String> {
+fn enum_symbols_native_impl(
+    pid: i32,
+    module_base: usize,
+) -> Result<Vec<serde_json::Value>, String> {
     let mut count: usize = 0;
     let symbol_info_ptr = unsafe { enum_symbols_native(pid, module_base, &mut count) };
 
@@ -696,11 +786,7 @@ fn enum_symbols_native_impl(pid: i32, module_base: usize) -> Result<Vec<serde_js
     let mut symbols = Vec::new();
 
     for info in symbol_info_slice {
-        let symbol_name = unsafe {
-            CStr::from_ptr(info.name)
-                .to_string_lossy()
-                .into_owned()
-        };
+        let symbol_name = unsafe { CStr::from_ptr(info.name).to_string_lossy().into_owned() };
 
         let symbol_type = unsafe {
             CStr::from_ptr(info.symbol_type)
@@ -708,11 +794,7 @@ fn enum_symbols_native_impl(pid: i32, module_base: usize) -> Result<Vec<serde_js
                 .into_owned()
         };
 
-        let scope = unsafe {
-            CStr::from_ptr(info.scope)
-                .to_string_lossy()
-                .into_owned()
-        };
+        let scope = unsafe { CStr::from_ptr(info.scope).to_string_lossy().into_owned() };
 
         let file_name = unsafe {
             if info.file_name.is_null() || *info.file_name == 0 {
@@ -736,7 +818,7 @@ fn enum_symbols_native_impl(pid: i32, module_base: usize) -> Result<Vec<serde_js
         }));
 
         // Free allocated memory
-        unsafe { 
+        unsafe {
             libc::free(info.name as *mut libc::c_void);
             libc::free(info.symbol_type as *mut libc::c_void);
             libc::free(info.scope as *mut libc::c_void);
@@ -759,17 +841,23 @@ pub fn enum_symbols(pid: i32, module_base: usize) -> Result<Vec<serde_json::Valu
         // Try MachOKit first for better symbol coverage (especially for dyld cache)
         match enum_symbols_machokit(pid, module_base) {
             Ok(symbols) => {
-                log::debug!("Successfully enumerated {} symbols via MachOKit for module at 0x{:X}", 
-                           symbols.len(), module_base);
+                log::debug!(
+                    "Successfully enumerated {} symbols via MachOKit for module at 0x{:X}",
+                    symbols.len(),
+                    module_base
+                );
                 return Ok(symbols);
             }
             Err(e) => {
-                log::debug!("MachOKit symbol enumeration failed, falling back to native: {}", e);
+                log::debug!(
+                    "MachOKit symbol enumeration failed, falling back to native: {}",
+                    e
+                );
                 // Fall through to native implementation
             }
         }
     }
-    
+
     // Fallback to native C++ implementation
     enum_symbols_native_impl(pid, module_base)
 }
@@ -791,9 +879,7 @@ pub fn enum_threads(pid: i32) -> Result<Vec<serde_json::Value>, String> {
             if info.name.is_null() {
                 String::from("Unknown")
             } else {
-                CStr::from_ptr(info.name)
-                    .to_string_lossy()
-                    .into_owned()
+                CStr::from_ptr(info.name).to_string_lossy().into_owned()
             }
         };
 
@@ -831,10 +917,15 @@ pub fn enum_regions_fast(pid: i32) -> Result<Vec<serde_json::Value>, String> {
     enum_regions_with_filenames(pid, false)
 }
 
-pub fn enum_regions_with_filenames(pid: i32, include_filenames: bool) -> Result<Vec<serde_json::Value>, String> {
+pub fn enum_regions_with_filenames(
+    pid: i32,
+    include_filenames: bool,
+) -> Result<Vec<serde_json::Value>, String> {
     let mut buffer = vec![0u8; 4 * 1024 * 1024]; // 4MB buffer for large /proc/pid/maps on Android
 
-    unsafe { enumerate_regions_to_buffer(pid, buffer.as_mut_ptr(), buffer.len(), include_filenames) };
+    unsafe {
+        enumerate_regions_to_buffer(pid, buffer.as_mut_ptr(), buffer.len(), include_filenames)
+    };
 
     let buffer_cstring = unsafe { CString::from_vec_unchecked(buffer) };
     let buffer_string = match buffer_cstring.into_string() {
@@ -897,7 +988,7 @@ pub fn get_application_info(pid: i32) -> Result<String, Error> {
 
 pub fn get_process_icon(pid: i32) -> Result<Vec<u8>, Error> {
     let mut size: usize = 0;
-    
+
     let result = unsafe {
         let raw_ptr = get_process_icon_native(pid, &mut size as *mut usize);
         if raw_ptr.is_null() || size == 0 {
@@ -923,7 +1014,10 @@ pub fn continue_execution(thread_id: libc::uintptr_t) -> Result<(), Error> {
         Ok(())
     } else {
         // Convert Mach kernel return to appropriate error
-        Err(Error::new(std::io::ErrorKind::Other, format!("Continue execution failed with kernel return: {}", result)))
+        Err(Error::new(
+            std::io::ErrorKind::Other,
+            format!("Continue execution failed with kernel return: {}", result),
+        ))
     }
 }
 
@@ -933,7 +1027,10 @@ pub fn single_step(thread_id: libc::uintptr_t) -> Result<(), Error> {
         Ok(())
     } else {
         // Convert Mach kernel return to appropriate error
-        Err(Error::new(std::io::ErrorKind::Other, format!("Single step failed with kernel return: {}", result)))
+        Err(Error::new(
+            std::io::ErrorKind::Other,
+            format!("Single step failed with kernel return: {}", result),
+        ))
     }
 }
 
@@ -985,9 +1082,12 @@ pub fn set_signal_config(signal: i32, config: SignalConfig) {
 
 pub fn get_signal_config(signal: i32) -> SignalConfig {
     let mut catch_signal = false;
-    let mut pass_signal = false;  // Default: don't pass (like GDB)
+    let mut pass_signal = false; // Default: don't pass (like GDB)
     unsafe { get_signal_config_native(signal, &mut catch_signal, &mut pass_signal) }
-    SignalConfig { catch_signal, pass_signal }
+    SignalConfig {
+        catch_signal,
+        pass_signal,
+    }
 }
 
 pub fn get_all_signal_configs() -> Vec<(i32, SignalConfig)> {
@@ -1072,13 +1172,10 @@ pub fn is_script_trace_stop_requested() -> bool {
 
 // Full memory cache functions
 pub fn enable_full_memory_cache(dump_filepath: &str, log_filepath: &str) {
-    if let (Ok(c_dump_path), Ok(c_log_path)) = (
-        CString::new(dump_filepath),
-        CString::new(log_filepath),
-    ) {
-        unsafe {
-            enable_full_memory_cache_native(c_dump_path.as_ptr(), c_log_path.as_ptr())
-        }
+    if let (Ok(c_dump_path), Ok(c_log_path)) =
+        (CString::new(dump_filepath), CString::new(log_filepath))
+    {
+        unsafe { enable_full_memory_cache_native(c_dump_path.as_ptr(), c_log_path.as_ptr()) }
     }
 }
 
@@ -1116,10 +1213,13 @@ pub fn get_installed_apps() -> Result<String, Error> {
 
 pub fn get_app_icon(bundle_identifier: &str) -> Result<Vec<u8>, Error> {
     let c_bundle_id = CString::new(bundle_identifier).map_err(|_| {
-        Error::new(std::io::ErrorKind::InvalidInput, "Invalid bundle identifier")
+        Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Invalid bundle identifier",
+        )
     })?;
     let mut size: usize = 0;
-    
+
     let result = unsafe {
         let raw_ptr = get_app_icon_native(c_bundle_id.as_ptr(), &mut size as *mut usize);
         if raw_ptr.is_null() || size == 0 {
@@ -1140,20 +1240,23 @@ pub fn get_app_icon(bundle_identifier: &str) -> Result<Vec<u8>, Error> {
 
 pub fn spawn_app(bundle_identifier: &str, suspended: bool) -> Result<String, Error> {
     let c_bundle_id = CString::new(bundle_identifier).map_err(|_| {
-        Error::new(std::io::ErrorKind::InvalidInput, "Invalid bundle identifier")
+        Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Invalid bundle identifier",
+        )
     })?;
-    
+
     let result = unsafe {
         let raw_ptr = spawn_app_native(c_bundle_id.as_ptr(), if suspended { 1 } else { 0 });
         if raw_ptr.is_null() {
-            return Err(Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to spawn app",
-            ));
+            return Err(Error::new(std::io::ErrorKind::Other, "Failed to spawn app"));
         }
 
         let c_str = CStr::from_ptr(raw_ptr);
-        let result_str = c_str.to_str().unwrap_or("{\"success\":false,\"error\":\"Invalid UTF-8\"}").to_owned();
+        let result_str = c_str
+            .to_str()
+            .unwrap_or("{\"success\":false,\"error\":\"Invalid UTF-8\"}")
+            .to_owned();
         libc::free(raw_ptr as *mut libc::c_void);
 
         result_str
@@ -1163,9 +1266,7 @@ pub fn spawn_app(bundle_identifier: &str, suspended: bool) -> Result<String, Err
 }
 
 pub fn terminate_app(pid: i32) -> Result<bool, Error> {
-    let result = unsafe {
-        terminate_app_native(pid)
-    };
+    let result = unsafe { terminate_app_native(pid) };
 
     Ok(result != 0)
 }
@@ -1181,7 +1282,10 @@ pub fn resume_app(pid: i32) -> Result<String, Error> {
         }
 
         let c_str = CStr::from_ptr(raw_ptr);
-        let result_str = c_str.to_str().unwrap_or("{\"success\":false,\"error\":\"Invalid UTF-8\"}").to_owned();
+        let result_str = c_str
+            .to_str()
+            .unwrap_or("{\"success\":false,\"error\":\"Invalid UTF-8\"}")
+            .to_owned();
         libc::free(raw_ptr as *mut libc::c_void);
 
         result_str
@@ -1192,9 +1296,12 @@ pub fn resume_app(pid: i32) -> Result<String, Error> {
 
 pub fn get_app_running_status(bundle_identifier: &str) -> Result<String, Error> {
     let c_bundle_id = CString::new(bundle_identifier).map_err(|_| {
-        Error::new(std::io::ErrorKind::InvalidInput, "Invalid bundle identifier")
+        Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Invalid bundle identifier",
+        )
     })?;
-    
+
     let result = unsafe {
         let raw_ptr = get_app_running_status_native(c_bundle_id.as_ptr());
         if raw_ptr.is_null() {
@@ -1205,7 +1312,10 @@ pub fn get_app_running_status(bundle_identifier: &str) -> Result<String, Error> 
         }
 
         let c_str = CStr::from_ptr(raw_ptr);
-        let result_str = c_str.to_str().unwrap_or("{\"running\":false,\"pid\":0}").to_owned();
+        let result_str = c_str
+            .to_str()
+            .unwrap_or("{\"running\":false,\"pid\":0}")
+            .to_owned();
         libc::free(raw_ptr as *mut libc::c_void);
 
         result_str

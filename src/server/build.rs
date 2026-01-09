@@ -461,9 +461,18 @@ fn main() {
             // Set macOS deployment target
             build.flag("-mmacosx-version-min=10.12");
 
-            build.file("src/cpp/src/darwin/native_api.mm");
-            build.file("src/cpp/src/darwin/file_api.mm");
-            build.file("src/cpp/src/darwin/debugger.mm");
+            build.file("src/cpp/src/darwin/core/native_api.mm");
+            build.file("src/cpp/src/darwin/core/file_api.mm");
+            build.file("src/cpp/src/darwin/core/memory_io.mm");
+            build.file("src/cpp/src/darwin/core/process_api.mm");
+            // Debugger (split into multiple files)
+            build.file("src/cpp/src/darwin/debugger/debugger_core.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_breakpoint.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_watchpoint.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_exception.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_register.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_trace.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_native_api.mm");
             build.file("src/cpp/src/common/util.cpp");
             build.file("src/cpp/src/common/trace_file.cpp");
             build.file("src/cpp/src/common/arm64_decoder.cpp");
@@ -486,9 +495,18 @@ fn main() {
             // Set iOS deployment target to match Rust's target
             build.flag("-mios-version-min=10.0");
 
-            build.file("src/cpp/src/darwin/native_api.mm");
-            build.file("src/cpp/src/darwin/file_api.mm");
-            build.file("src/cpp/src/darwin/debugger.mm");
+            build.file("src/cpp/src/darwin/core/native_api.mm");
+            build.file("src/cpp/src/darwin/core/file_api.mm");
+            build.file("src/cpp/src/darwin/core/memory_io.mm");
+            build.file("src/cpp/src/darwin/core/process_api.mm");
+            // Debugger (split into multiple files)
+            build.file("src/cpp/src/darwin/debugger/debugger_core.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_breakpoint.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_watchpoint.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_exception.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_register.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_trace.mm");
+            build.file("src/cpp/src/darwin/debugger/debugger_native_api.mm");
             build.file("src/cpp/src/common/util.cpp");
             build.file("src/cpp/src/common/trace_file.cpp");
             build.file("src/cpp/src/common/arm64_decoder.cpp");
@@ -505,6 +523,8 @@ fn main() {
             build.file("src/cpp/src/linux/core/native_api.cpp");
             build.file("src/cpp/src/linux/core/file_api.cpp");
             build.file("src/cpp/src/linux/core/memory_io.cpp");
+            build.file("src/cpp/src/linux/core/callback_stubs.cpp");
+            build.file("src/cpp/src/linux/core/process_api.cpp");
             // Debugger (split into multiple files)
             build.file("src/cpp/src/linux/debugger/debugger_core.cpp");
             build.file("src/cpp/src/linux/debugger/debugger_breakpoint.cpp");
@@ -535,6 +555,8 @@ fn main() {
             build.file("src/cpp/src/linux/core/native_api.cpp");
             build.file("src/cpp/src/linux/core/file_api.cpp");
             build.file("src/cpp/src/linux/core/memory_io.cpp");
+            build.file("src/cpp/src/linux/core/callback_stubs.cpp");
+            build.file("src/cpp/src/linux/core/process_api.cpp");
             // Debugger (split into multiple files)
             build.file("src/cpp/src/linux/debugger/debugger_core.cpp");
             build.file("src/cpp/src/linux/debugger/debugger_breakpoint.cpp");

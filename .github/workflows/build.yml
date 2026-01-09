@@ -39,6 +39,14 @@ on:
         description: "Build Linux Server (x86_64)"
         type: boolean
         default: false
+      build_server_ios:
+        description: "Build iOS Server (arm64)"
+        type: boolean
+        default: false
+      build_server_macos:
+        description: "Build macOS Server (arm64)"
+        type: boolean
+        default: false
 
       # macOS options
       notarize_macos:
@@ -559,3 +567,79 @@ jobs:
         with:
           name: dbgsrv-linux-x86_64-${{ github.event.inputs.version }}
           path: src/server/target/x86_64-unknown-linux-gnu/release/dbgsrv
+
+  # ============================================
+  # iOS Server (arm64)
+  # ============================================
+  build-server-ios:
+    if: ${{ github.event.inputs.build_server_ios == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Xcode version
+        run: |
+          LATEST_XCODE=$(ls -1 /Applications | grep -E '^Xcode.*\.app$' | sort -V | tail -1)
+          [ -n "$LATEST_XCODE" ] && sudo xcode-select --switch "/Applications/$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-server-ios-${{ hashFiles('src/server/Cargo.lock') }}
+
+      - name: Add Rust target
+        run: rustup target add aarch64-apple-ios
+
+      - name: Build iOS Server
+        run: cd src/server && cargo build --target=aarch64-apple-ios --release
+
+      - name: Upload iOS Server
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbgsrv-ios-arm64-${{ github.event.inputs.version }}
+          path: src/server/target/aarch64-apple-ios/release/dbgsrv
+
+  # ============================================
+  # macOS Server (arm64)
+  # ============================================
+  build-server-macos:
+    if: ${{ github.event.inputs.build_server_macos == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Xcode version
+        run: |
+          LATEST_XCODE=$(ls -1 /Applications | grep -E '^Xcode.*\.app$' | sort -V | tail -1)
+          [ -n "$LATEST_XCODE" ] && sudo xcode-select --switch "/Applications/$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-server-macos-${{ hashFiles('src/server/Cargo.lock') }}
+
+      - name: Add Rust target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Build macOS Server
+        run: cd src/server && cargo build --target=aarch64-apple-darwin --release
+
+      - name: Upload macOS Server
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbgsrv-macos-arm64-${{ github.event.inputs.version }}
+          path: src/server/target/aarch64-apple-darwin/release/dbgsrv

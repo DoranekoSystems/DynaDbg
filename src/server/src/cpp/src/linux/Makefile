@@ -86,7 +86,8 @@ CORE_SOURCES = \
     core/native_api.cpp \
     core/file_api.cpp \
     core/memory_io.cpp \
-    core/callback_stubs.cpp
+    core/callback_stubs.cpp \
+    core/process_api.cpp
 
 DEBUGGER_SOURCES = \
     debugger/debugger_core.cpp \

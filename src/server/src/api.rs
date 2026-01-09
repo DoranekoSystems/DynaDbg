@@ -4416,7 +4416,7 @@ pub async fn get_app_icon_handler(
 
 // Spawn app via FBSSystemService (iOS/macOS)
 pub async fn spawn_app_handler(
-    _pid_state: Arc<Mutex<Option<i32>>>,
+    pid_state: Arc<Mutex<Option<i32>>>,
     _request: request::SpawnAppRequest,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     #[cfg(any(target_os = "ios", target_os = "macos"))]

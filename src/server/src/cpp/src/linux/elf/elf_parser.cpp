@@ -680,7 +680,7 @@ std::vector<SymbolInfo> parse_elf_symbols(const std::string& elf_path, uintptr_t
     return symbols;
 }
 
-extern "C" SymbolInfo* enum_symbols_native(int pid, uintptr_t module_base, size_t* count)
+extern "C" SymbolInfo* enumerate_symbols(int pid, uintptr_t module_base, size_t* count)
 {
     *count = 0;
 
