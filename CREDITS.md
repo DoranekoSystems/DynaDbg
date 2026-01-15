@@ -22,3 +22,4 @@ This project uses the following open source libraries:
 
 ## Special Thanks
 * [MachOKit](https://github.com/p-x9/MachOKit) by [p-x9](https://github.com/p-x9) - MIT License
+* [Cetus](https://github.com/Qwokka/Cetus) by [Qwokka](https://github.com/Qwokka) - Apache License 2.0

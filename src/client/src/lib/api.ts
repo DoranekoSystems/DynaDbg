@@ -1989,6 +1989,63 @@ class ApiClient {
       method: "POST",
     });
   }
+
+  // =============================================
+  // WASM Binary APIs
+  // =============================================
+
+  /**
+   * Dump the entire WASM binary from Chrome extension
+   * Returns ArrayBuffer of the WASM module
+   */
+  async dumpWasmBinary(): Promise<ArrayBuffer | null> {
+    const url = `${this.baseUrl}/api/wasm/dump`;
+    const headers: { [key: string]: string } = {};
+    
+    if (this.authToken) {
+      headers["Authorization"] = `Bearer ${this.authToken}`;
+    }
+
+    try {
+      const response = await fetch(url, { headers });
+      
+      if (!response.ok) {
+        console.error(`WASM dump failed: ${response.status}`);
+        return null;
+      }
+      
+      return await response.arrayBuffer();
+    } catch (error) {
+      console.error("Failed to dump WASM binary:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Get WASM module info from Chrome extension
+   */
+  async getWasmModuleInfo(): Promise<{
+    codeSize: number;
+    hasBinary: boolean;
+    hasSnapshot: boolean;
+  } | null> {
+    try {
+      const response = await this.request<{
+        module_info: { codeSize: number };
+        has_binary: boolean;
+        has_snapshot: boolean;
+      }>("/api/wasm/info");
+      
+      return {
+        codeSize: response.module_info?.codeSize || 0,
+        hasBinary: response.has_binary || false,
+        hasSnapshot: response.has_snapshot || false,
+      };
+    } catch (error) {
+      console.error("Failed to get WASM module info:", error);
+      return null;
+    }
+  }
 }
 
 // Global API client instance

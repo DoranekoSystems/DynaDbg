@@ -7,8 +7,16 @@ use crate::api;
 use crate::logger;
 use crate::native_bridge;
 use crate::request;
+use crate::wasm_bridge;
 
 pub async fn serve(mode: i32, host: IpAddr, port: u16) {
+    // Initialize WASM bridge if in WASM mode
+    if wasm_bridge::is_wasm_mode() {
+        if let Err(e) = wasm_bridge::init_wasm_bridge().await {
+            log::error!("Failed to initialize WASM bridge: {}", e);
+        }
+    }
+
     let pid_state = Arc::new(Mutex::new(None));
 
     let cors = warp::cors()
@@ -433,6 +441,24 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
             api::upload_file_handler(upload_request.path, body).await
         });
 
+    // WASM binary dump for Ghidra analysis
+    let wasm_dump = api
+        .and(warp::path!("wasm" / "dump"))
+        .and(warp::get())
+        .and(api::with_auth())
+        .and_then(|| async move {
+            api::wasm_dump_handler().await
+        });
+
+    // WASM module info
+    let wasm_info = api
+        .and(warp::path!("wasm" / "info"))
+        .and(warp::get())
+        .and(api::with_auth())
+        .and_then(|| async move {
+            api::wasm_info_handler().await
+        });
+
     let get_exception_info = api
         .and(warp::path!("debug" / "exception"))
         .and(warp::get())
@@ -661,6 +687,8 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
         .or(explore_directory)
         .or(read_file)
         .or(upload_file)
+        .or(wasm_dump)
+        .or(wasm_info)
         .or(execute_script)
         .or(script_status)
         .or(script_disable)

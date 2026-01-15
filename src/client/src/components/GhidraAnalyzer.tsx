@@ -437,6 +437,16 @@ export const GhidraAnalyzer: React.FC<GhidraAnalyzerProps> = ({
     });
   }, [modules, moduleFilter, getModuleServerStatus, isModuleAnalyzed]);
 
+  // Check if selected module is a WASM module (Ghidra doesn't support WASM)
+  const isSelectedModuleWasm = useMemo(() => {
+    if (!selectedModule) return false;
+    const modulePath = getModulePath(selectedModule);
+    if (!modulePath) return false;
+    return modulePath.toLowerCase() === "wasm" || 
+           selectedModule.modulename?.toLowerCase().includes("wasm") ||
+           modulePath.toLowerCase().endsWith(".wasm");
+  }, [selectedModule]);
+
   // Save analyzed libraries
   const saveAnalyzedLibraries = useCallback(
     (libs: Map<string, AnalyzedLibrary>) => {
@@ -467,16 +477,58 @@ export const GhidraAnalyzer: React.FC<GhidraAnalyzerProps> = ({
     addLog("info", `Ghidra path: ${ghidraPath}`);
 
     try {
-      // Step 1: Download library from server
-      setAnalysisProgress("Downloading library from server...");
-      addLog("info", "Downloading library from server...");
+      let localPath: string;
 
-      const localPath = await invoke<string>("download_library_file", {
-        libraryPath: modulePath,
-        projectName: projectName || null,
-      });
+      // Check if this is a WASM module (path is "wasm" or modulename contains "wasm")
+      const isWasmModule = modulePath.toLowerCase() === "wasm" || 
+                           selectedModule.modulename?.toLowerCase().includes("wasm");
 
-      addLog("success", `Downloaded to: ${localPath}`);
+      if (isWasmModule) {
+        // WASM mode: Download binary from Chrome extension via /api/wasm/dump
+        setAnalysisProgress("Downloading WASM binary from browser...");
+        addLog("info", "Fetching WASM binary from Chrome extension...");
+
+        const apiClient = getApiClient();
+        const wasmBinary = await apiClient.dumpWasmBinary();
+        
+        if (!wasmBinary || wasmBinary.byteLength === 0) {
+          throw new Error("Failed to download WASM binary - no data received");
+        }
+
+        addLog("success", `Downloaded WASM binary: ${wasmBinary.byteLength} bytes`);
+
+        // Verify WASM magic number
+        const header = new Uint8Array(wasmBinary.slice(0, 4));
+        const isValidWasm = header[0] === 0x00 && header[1] === 0x61 && 
+                           header[2] === 0x73 && header[3] === 0x6d; // \0asm
+        if (!isValidWasm) {
+          addLog("info", `Warning: Binary doesn't have WASM magic number (got: ${Array.from(header).map(b => b.toString(16).padStart(2, '0')).join(' ')})`);
+        } else {
+          addLog("info", "Valid WASM binary (magic: \\0asm)");
+        }
+
+        // Save WASM binary to local file (same location as native libraries)
+        setAnalysisProgress("Saving WASM binary to disk...");
+        const binaryArray = Array.from(new Uint8Array(wasmBinary));
+        localPath = await invoke<string>("save_wasm_binary", {
+          binaryData: binaryArray,
+          moduleName: selectedModule.modulename || "wasm_module",
+          projectName: projectName || null,
+        });
+
+        addLog("success", `Saved to: ${localPath}`);
+      } else {
+        // Native mode: Download library from server
+        setAnalysisProgress("Downloading library from server...");
+        addLog("info", "Downloading library from server...");
+
+        localPath = await invoke<string>("download_library_file", {
+          libraryPath: modulePath,
+          projectName: projectName || null,
+        });
+
+        addLog("success", `Downloaded to: ${localPath}`);
+      }
 
       // Step 2: Run Ghidra analysis
       setAnalysisProgress(
@@ -504,7 +556,9 @@ export const GhidraAnalyzer: React.FC<GhidraAnalyzerProps> = ({
         setAnalysisProgress("Fetching function list...");
         addLog("info", "Fetching function list from Ghidra...");
 
-        const pathParts = modulePath.split(/[/\\]/);
+        // Use localPath (the actual analyzed file) for library name, not modulePath
+        // This is important for WASM mode where localPath is the actual .wasm file
+        const pathParts = localPath.split(/[/\\]/);
         const libraryName = pathParts[pathParts.length - 1];
 
         let functions: Array<{ name: string; address: string; size: number }> =
@@ -1219,23 +1273,48 @@ export const GhidraAnalyzer: React.FC<GhidraAnalyzerProps> = ({
             flexWrap: "wrap",
           }}
         >
-          <Button
-            variant="contained"
-            color="primary"
-            startIcon={<PlayArrowIcon />}
-            onClick={analyzeModule}
-            disabled={
-              !selectedModule ||
-              !getModulePath(selectedModule) ||
-              !ghidraPath ||
-              !projectName ||
-              isAnalyzing ||
-              !serverConnected
+          <Tooltip
+            title={
+              isSelectedModuleWasm
+                ? "Ghidra does not support WebAssembly analysis"
+                : !selectedModule
+                ? "Select a module to analyze"
+                : !ghidraPath
+                ? "Configure Ghidra path first"
+                : !projectName
+                ? "Enter a project name"
+                : !serverConnected
+                ? "Connect to server first"
+                : ""
             }
-            sx={{ minWidth: 120 }}
+            arrow
           >
-            {isAnalyzing ? "Analyzing..." : "Analyze"}
-          </Button>
+            <span>
+              <Button
+                variant="contained"
+                color="primary"
+                startIcon={<PlayArrowIcon />}
+                onClick={analyzeModule}
+                disabled={
+                  !selectedModule ||
+                  !getModulePath(selectedModule) ||
+                  !ghidraPath ||
+                  !projectName ||
+                  isAnalyzing ||
+                  !serverConnected ||
+                  isSelectedModuleWasm
+                }
+                sx={{ 
+                  minWidth: 120,
+                  ...(isSelectedModuleWasm && {
+                    opacity: 0.5,
+                  }),
+                }}
+              >
+                {isAnalyzing ? "Analyzing..." : isSelectedModuleWasm ? "Not Supported" : "Analyze"}
+              </Button>
+            </span>
+          </Tooltip>
           {/* Start/Stop Server button - only show for analyzed modules */}
           {isSelectedModuleAnalyzed &&
             (isSelectedModuleServerRunning ? (

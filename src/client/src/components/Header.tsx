@@ -428,8 +428,8 @@ export const Header: React.FC<HeaderProps> = ({
           </Box>
         )}
 
-        {/* Process Info - displayed when attached */}
-        {attachedProcess && (
+        {/* Process Info - displayed when attached (hide for WASM mode) */}
+        {attachedProcess && attachedProcess.pid !== 0 && (
           <Box sx={{ display: "flex", alignItems: "center", mr: 1 }}>
             <Chip
               size="small"

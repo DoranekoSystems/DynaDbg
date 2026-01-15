@@ -15,6 +15,7 @@ mod native_bridge;
 mod request;
 mod serve;
 mod util;
+mod wasm_bridge;
 
 #[ctor]
 fn init() {
@@ -52,6 +53,20 @@ async fn main() {
                 .value_name("FILE")
                 .help("Sets the log file path (appends to existing file)"),
         )
+        .arg(
+            Arg::new("wasm")
+                .long("wasm")
+                .num_args(0)
+                .help("Enable WASM mode for browser-based WebAssembly debugging"),
+        )
+        .arg(
+            Arg::new("wasm-ws-port")
+                .long("wasm-ws-port")
+                .num_args(1)
+                .value_name("PORT")
+                .default_value("8765")
+                .help("WebSocket port for WASM memory bridge (default: 8765)"),
+        )
         .get_matches();
 
     let port: u16 = matches
@@ -68,12 +83,34 @@ async fn main() {
         .get_one("log-file")
         .map(|s: &String| s.to_string());
 
+    let wasm_mode = matches.get_flag("wasm");
+    let wasm_ws_port: u16 = matches
+        .get_one::<String>("wasm-ws-port")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8765);
+
+    // Set running mode based on --wasm flag
+    if wasm_mode {
+        std::env::set_var("DBGSRV_RUNNING_MODE", "wasm");
+        std::env::set_var("DBGSRV_WASM_WS_PORT", wasm_ws_port.to_string());
+        println!("WASM mode enabled. WebSocket server will listen on port {}", wasm_ws_port);
+    }
+
     println!(
         "DynaDbg server has started listening on host {} and port {}.",
         host, port
     );
 
     logger::init_log(log_file.as_deref());
+
+    // Initialize WASM bridge if in WASM mode
+    if wasm_mode {
+        if let Err(e) = wasm_bridge::init_wasm_bridge().await {
+            log::error!("Failed to initialize WASM bridge: {}", e);
+            eprintln!("Failed to initialize WASM bridge: {}", e);
+            return;
+        }
+    }
 
     // Lua engine is lightweight and doesn't need pre-initialization
 

@@ -11,6 +11,7 @@ use tokio::io::AsyncWriteExt;
 use rusqlite::{Connection, params};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use wasmparser::{Parser, Payload, Operator};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -1605,6 +1606,1375 @@ async fn read_memory(address: u64, size: usize) -> Result<MemoryReadResponse, St
     }
 }
 
+/// WASM opcode to mnemonic mapping (basic opcodes)
+fn wasm_opcode_to_string(opcode: u8) -> (&'static str, usize) {
+    // Returns (mnemonic, instruction_length including opcode)
+    match opcode {
+        // Control instructions
+        0x00 => ("unreachable", 1),
+        0x01 => ("nop", 1),
+        0x02 => ("block", 2),      // + blocktype
+        0x03 => ("loop", 2),       // + blocktype
+        0x04 => ("if", 2),         // + blocktype
+        0x05 => ("else", 1),
+        0x0B => ("end", 1),
+        0x0C => ("br", 2),         // + labelidx
+        0x0D => ("br_if", 2),      // + labelidx
+        0x0E => ("br_table", 2),   // variable, simplified
+        0x0F => ("return", 1),
+        0x10 => ("call", 5),       // + funcidx (leb128)
+        0x11 => ("call_indirect", 6), // + typeidx + tableidx
+        
+        // Parametric instructions
+        0x1A => ("drop", 1),
+        0x1B => ("select", 1),
+        0x1C => ("select", 2),     // typed select
+        
+        // Variable instructions
+        0x20 => ("local.get", 2),
+        0x21 => ("local.set", 2),
+        0x22 => ("local.tee", 2),
+        0x23 => ("global.get", 2),
+        0x24 => ("global.set", 2),
+        
+        // Table instructions
+        0x25 => ("table.get", 2),
+        0x26 => ("table.set", 2),
+        
+        // Memory instructions
+        0x28 => ("i32.load", 3),
+        0x29 => ("i64.load", 3),
+        0x2A => ("f32.load", 3),
+        0x2B => ("f64.load", 3),
+        0x2C => ("i32.load8_s", 3),
+        0x2D => ("i32.load8_u", 3),
+        0x2E => ("i32.load16_s", 3),
+        0x2F => ("i32.load16_u", 3),
+        0x30 => ("i64.load8_s", 3),
+        0x31 => ("i64.load8_u", 3),
+        0x32 => ("i64.load16_s", 3),
+        0x33 => ("i64.load16_u", 3),
+        0x34 => ("i64.load32_s", 3),
+        0x35 => ("i64.load32_u", 3),
+        0x36 => ("i32.store", 3),
+        0x37 => ("i64.store", 3),
+        0x38 => ("f32.store", 3),
+        0x39 => ("f64.store", 3),
+        0x3A => ("i32.store8", 3),
+        0x3B => ("i32.store16", 3),
+        0x3C => ("i64.store8", 3),
+        0x3D => ("i64.store16", 3),
+        0x3E => ("i64.store32", 3),
+        0x3F => ("memory.size", 2),
+        0x40 => ("memory.grow", 2),
+        
+        // Numeric instructions - constants
+        0x41 => ("i32.const", 5),   // + i32 leb128
+        0x42 => ("i64.const", 9),   // + i64 leb128
+        0x43 => ("f32.const", 5),   // + f32
+        0x44 => ("f64.const", 9),   // + f64
+        
+        // Numeric instructions - comparison
+        0x45 => ("i32.eqz", 1),
+        0x46 => ("i32.eq", 1),
+        0x47 => ("i32.ne", 1),
+        0x48 => ("i32.lt_s", 1),
+        0x49 => ("i32.lt_u", 1),
+        0x4A => ("i32.gt_s", 1),
+        0x4B => ("i32.gt_u", 1),
+        0x4C => ("i32.le_s", 1),
+        0x4D => ("i32.le_u", 1),
+        0x4E => ("i32.ge_s", 1),
+        0x4F => ("i32.ge_u", 1),
+        
+        0x50 => ("i64.eqz", 1),
+        0x51 => ("i64.eq", 1),
+        0x52 => ("i64.ne", 1),
+        0x53 => ("i64.lt_s", 1),
+        0x54 => ("i64.lt_u", 1),
+        0x55 => ("i64.gt_s", 1),
+        0x56 => ("i64.gt_u", 1),
+        0x57 => ("i64.le_s", 1),
+        0x58 => ("i64.le_u", 1),
+        0x59 => ("i64.ge_s", 1),
+        0x5A => ("i64.ge_u", 1),
+        
+        0x5B => ("f32.eq", 1),
+        0x5C => ("f32.ne", 1),
+        0x5D => ("f32.lt", 1),
+        0x5E => ("f32.gt", 1),
+        0x5F => ("f32.le", 1),
+        0x60 => ("f32.ge", 1),
+        
+        0x61 => ("f64.eq", 1),
+        0x62 => ("f64.ne", 1),
+        0x63 => ("f64.lt", 1),
+        0x64 => ("f64.gt", 1),
+        0x65 => ("f64.le", 1),
+        0x66 => ("f64.ge", 1),
+        
+        // Numeric instructions - arithmetic
+        0x67 => ("i32.clz", 1),
+        0x68 => ("i32.ctz", 1),
+        0x69 => ("i32.popcnt", 1),
+        0x6A => ("i32.add", 1),
+        0x6B => ("i32.sub", 1),
+        0x6C => ("i32.mul", 1),
+        0x6D => ("i32.div_s", 1),
+        0x6E => ("i32.div_u", 1),
+        0x6F => ("i32.rem_s", 1),
+        0x70 => ("i32.rem_u", 1),
+        0x71 => ("i32.and", 1),
+        0x72 => ("i32.or", 1),
+        0x73 => ("i32.xor", 1),
+        0x74 => ("i32.shl", 1),
+        0x75 => ("i32.shr_s", 1),
+        0x76 => ("i32.shr_u", 1),
+        0x77 => ("i32.rotl", 1),
+        0x78 => ("i32.rotr", 1),
+        
+        0x79 => ("i64.clz", 1),
+        0x7A => ("i64.ctz", 1),
+        0x7B => ("i64.popcnt", 1),
+        0x7C => ("i64.add", 1),
+        0x7D => ("i64.sub", 1),
+        0x7E => ("i64.mul", 1),
+        0x7F => ("i64.div_s", 1),
+        0x80 => ("i64.div_u", 1),
+        0x81 => ("i64.rem_s", 1),
+        0x82 => ("i64.rem_u", 1),
+        0x83 => ("i64.and", 1),
+        0x84 => ("i64.or", 1),
+        0x85 => ("i64.xor", 1),
+        0x86 => ("i64.shl", 1),
+        0x87 => ("i64.shr_s", 1),
+        0x88 => ("i64.shr_u", 1),
+        0x89 => ("i64.rotl", 1),
+        0x8A => ("i64.rotr", 1),
+        
+        // Float operations
+        0x8B => ("f32.abs", 1),
+        0x8C => ("f32.neg", 1),
+        0x8D => ("f32.ceil", 1),
+        0x8E => ("f32.floor", 1),
+        0x8F => ("f32.trunc", 1),
+        0x90 => ("f32.nearest", 1),
+        0x91 => ("f32.sqrt", 1),
+        0x92 => ("f32.add", 1),
+        0x93 => ("f32.sub", 1),
+        0x94 => ("f32.mul", 1),
+        0x95 => ("f32.div", 1),
+        0x96 => ("f32.min", 1),
+        0x97 => ("f32.max", 1),
+        0x98 => ("f32.copysign", 1),
+        
+        0x99 => ("f64.abs", 1),
+        0x9A => ("f64.neg", 1),
+        0x9B => ("f64.ceil", 1),
+        0x9C => ("f64.floor", 1),
+        0x9D => ("f64.trunc", 1),
+        0x9E => ("f64.nearest", 1),
+        0x9F => ("f64.sqrt", 1),
+        0xA0 => ("f64.add", 1),
+        0xA1 => ("f64.sub", 1),
+        0xA2 => ("f64.mul", 1),
+        0xA3 => ("f64.div", 1),
+        0xA4 => ("f64.min", 1),
+        0xA5 => ("f64.max", 1),
+        0xA6 => ("f64.copysign", 1),
+        
+        // Conversions
+        0xA7 => ("i32.wrap_i64", 1),
+        0xA8 => ("i32.trunc_f32_s", 1),
+        0xA9 => ("i32.trunc_f32_u", 1),
+        0xAA => ("i32.trunc_f64_s", 1),
+        0xAB => ("i32.trunc_f64_u", 1),
+        0xAC => ("i64.extend_i32_s", 1),
+        0xAD => ("i64.extend_i32_u", 1),
+        0xAE => ("i64.trunc_f32_s", 1),
+        0xAF => ("i64.trunc_f32_u", 1),
+        0xB0 => ("i64.trunc_f64_s", 1),
+        0xB1 => ("i64.trunc_f64_u", 1),
+        0xB2 => ("f32.convert_i32_s", 1),
+        0xB3 => ("f32.convert_i32_u", 1),
+        0xB4 => ("f32.convert_i64_s", 1),
+        0xB5 => ("f32.convert_i64_u", 1),
+        0xB6 => ("f32.demote_f64", 1),
+        0xB7 => ("f64.convert_i32_s", 1),
+        0xB8 => ("f64.convert_i32_u", 1),
+        0xB9 => ("f64.convert_i64_s", 1),
+        0xBA => ("f64.convert_i64_u", 1),
+        0xBB => ("f64.promote_f32", 1),
+        0xBC => ("i32.reinterpret_f32", 1),
+        0xBD => ("i64.reinterpret_f64", 1),
+        0xBE => ("f32.reinterpret_i32", 1),
+        0xBF => ("f64.reinterpret_i64", 1),
+        
+        // Sign extension
+        0xC0 => ("i32.extend8_s", 1),
+        0xC1 => ("i32.extend16_s", 1),
+        0xC2 => ("i64.extend8_s", 1),
+        0xC3 => ("i64.extend16_s", 1),
+        0xC4 => ("i64.extend32_s", 1),
+        
+        // Multi-byte opcodes (FC prefix)
+        0xFC => ("(FC prefix)", 2),
+        // Multi-byte opcodes (FD prefix - SIMD)
+        0xFD => ("(FD simd)", 2),
+        
+        _ => ("unknown", 1),
+    }
+}
+
+/// Read unsigned LEB128 from bytes, returns (value, bytes_consumed)
+fn read_uleb128(data: &[u8], offset: usize) -> (u64, usize) {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    let mut idx = 0;
+    
+    while offset + idx < data.len() {
+        let byte = data[offset + idx];
+        result |= ((byte & 0x7f) as u64) << shift;
+        idx += 1;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 64 {
+            break;
+        }
+    }
+    
+    (result, idx)
+}
+
+/// Read signed LEB128 from bytes
+fn read_sleb128(data: &[u8], offset: usize) -> (i64, usize) {
+    let mut result: i64 = 0;
+    let mut shift = 0;
+    let mut idx = 0;
+    let mut byte = 0u8;
+    
+    while offset + idx < data.len() {
+        byte = data[offset + idx];
+        result |= ((byte & 0x7f) as i64) << shift;
+        shift += 7;
+        idx += 1;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        if shift >= 64 {
+            break;
+        }
+    }
+    
+    // Sign extend if needed
+    if shift < 64 && (byte & 0x40) != 0 {
+        result |= !0i64 << shift;
+    }
+    
+    (result, idx)
+}
+
+/// Get WASM instruction info: (mnemonic, total_bytes, operand_string, is_branch, branch_target_offset)
+fn decode_wasm_instruction(data: &[u8], offset: usize, _base_address: u64) -> (String, usize, String, bool, Option<u64>) {
+    if offset >= data.len() {
+        return ("".to_string(), 0, "".to_string(), false, None);
+    }
+    
+    let opcode = data[offset];
+    let mut consumed = 1usize;
+    let mut operand = String::new();
+    let mut is_branch = false;
+    let mut branch_target: Option<u64> = None;
+    
+    let mnemonic = match opcode {
+        // Control instructions
+        0x00 => "unreachable",
+        0x01 => "nop",
+        0x02 => { // block
+            if offset + 1 < data.len() {
+                let blocktype = data[offset + 1] as i8;
+                consumed += 1;
+                operand = match blocktype {
+                    0x40 => "".to_string(),
+                    t => format!("{:02x}", t as u8),
+                };
+            }
+            "block"
+        }
+        0x03 => { // loop
+            if offset + 1 < data.len() {
+                let blocktype = data[offset + 1] as i8;
+                consumed += 1;
+                operand = match blocktype {
+                    0x40 => "".to_string(),
+                    t => format!("{:02x}", t as u8),
+                };
+            }
+            "loop"
+        }
+        0x04 => { // if
+            if offset + 1 < data.len() {
+                consumed += 1;
+            }
+            "if"
+        }
+        0x05 => "else",
+        0x0B => "end",
+        0x0C => { // br
+            let (labelidx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", labelidx);
+            is_branch = true;
+            "br"
+        }
+        0x0D => { // br_if
+            let (labelidx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", labelidx);
+            is_branch = true;
+            "br_if"
+        }
+        0x0E => { // br_table
+            let (count, len1) = read_uleb128(data, offset + 1);
+            consumed += len1;
+            let mut labels = Vec::new();
+            for _ in 0..=count {
+                let (label, len) = read_uleb128(data, offset + consumed);
+                labels.push(label);
+                consumed += len;
+            }
+            operand = labels.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" ");
+            is_branch = true;
+            "br_table"
+        }
+        0x0F => "return",
+        0x10 => { // call
+            let (funcidx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("func[{}]", funcidx);
+            is_branch = true;
+            branch_target = Some(funcidx); // Function index as target
+            "call"
+        }
+        0x11 => { // call_indirect
+            let (typeidx, len1) = read_uleb128(data, offset + 1);
+            consumed += len1;
+            let (tableidx, len2) = read_uleb128(data, offset + 1 + len1);
+            consumed += len2;
+            operand = format!("type[{}] table[{}]", typeidx, tableidx);
+            "call_indirect"
+        }
+        
+        // Parametric
+        0x1A => "drop",
+        0x1B => "select",
+        
+        // Variable instructions
+        0x20 => { // local.get
+            let (idx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", idx);
+            "local.get"
+        }
+        0x21 => { // local.set
+            let (idx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", idx);
+            "local.set"
+        }
+        0x22 => { // local.tee
+            let (idx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", idx);
+            "local.tee"
+        }
+        0x23 => { // global.get
+            let (idx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", idx);
+            "global.get"
+        }
+        0x24 => { // global.set
+            let (idx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", idx);
+            "global.set"
+        }
+        
+        // Memory load/store
+        0x28..=0x3E => {
+            let (align, len1) = read_uleb128(data, offset + 1);
+            consumed += len1;
+            let (mem_offset, len2) = read_uleb128(data, offset + 1 + len1);
+            consumed += len2;
+            operand = format!("align={} offset={}", align, mem_offset);
+            match opcode {
+                0x28 => "i32.load",
+                0x29 => "i64.load",
+                0x2A => "f32.load",
+                0x2B => "f64.load",
+                0x2C => "i32.load8_s",
+                0x2D => "i32.load8_u",
+                0x2E => "i32.load16_s",
+                0x2F => "i32.load16_u",
+                0x30 => "i64.load8_s",
+                0x31 => "i64.load8_u",
+                0x32 => "i64.load16_s",
+                0x33 => "i64.load16_u",
+                0x34 => "i64.load32_s",
+                0x35 => "i64.load32_u",
+                0x36 => "i32.store",
+                0x37 => "i64.store",
+                0x38 => "f32.store",
+                0x39 => "f64.store",
+                0x3A => "i32.store8",
+                0x3B => "i32.store16",
+                0x3C => "i64.store8",
+                0x3D => "i64.store16",
+                0x3E => "i64.store32",
+                _ => "memory_op",
+            }
+        }
+        0x3F => { // memory.size
+            let (memidx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", memidx);
+            "memory.size"
+        }
+        0x40 => { // memory.grow
+            let (memidx, len) = read_uleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", memidx);
+            "memory.grow"
+        }
+        
+        // Constants
+        0x41 => { // i32.const
+            let (val, len) = read_sleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", val as i32);
+            "i32.const"
+        }
+        0x42 => { // i64.const
+            let (val, len) = read_sleb128(data, offset + 1);
+            consumed += len;
+            operand = format!("{}", val);
+            "i64.const"
+        }
+        0x43 => { // f32.const
+            if offset + 5 <= data.len() {
+                let bytes = [data[offset+1], data[offset+2], data[offset+3], data[offset+4]];
+                let val = f32::from_le_bytes(bytes);
+                operand = format!("{}", val);
+                consumed += 4;
+            }
+            "f32.const"
+        }
+        0x44 => { // f64.const
+            if offset + 9 <= data.len() {
+                let bytes = [data[offset+1], data[offset+2], data[offset+3], data[offset+4],
+                             data[offset+5], data[offset+6], data[offset+7], data[offset+8]];
+                let val = f64::from_le_bytes(bytes);
+                operand = format!("{}", val);
+                consumed += 8;
+            }
+            "f64.const"
+        }
+        
+        // Comparison i32
+        0x45 => "i32.eqz",
+        0x46 => "i32.eq",
+        0x47 => "i32.ne",
+        0x48 => "i32.lt_s",
+        0x49 => "i32.lt_u",
+        0x4A => "i32.gt_s",
+        0x4B => "i32.gt_u",
+        0x4C => "i32.le_s",
+        0x4D => "i32.le_u",
+        0x4E => "i32.ge_s",
+        0x4F => "i32.ge_u",
+        
+        // Comparison i64
+        0x50 => "i64.eqz",
+        0x51 => "i64.eq",
+        0x52 => "i64.ne",
+        0x53 => "i64.lt_s",
+        0x54 => "i64.lt_u",
+        0x55 => "i64.gt_s",
+        0x56 => "i64.gt_u",
+        0x57 => "i64.le_s",
+        0x58 => "i64.le_u",
+        0x59 => "i64.ge_s",
+        0x5A => "i64.ge_u",
+        
+        // Comparison f32
+        0x5B => "f32.eq",
+        0x5C => "f32.ne",
+        0x5D => "f32.lt",
+        0x5E => "f32.gt",
+        0x5F => "f32.le",
+        0x60 => "f32.ge",
+        
+        // Comparison f64
+        0x61 => "f64.eq",
+        0x62 => "f64.ne",
+        0x63 => "f64.lt",
+        0x64 => "f64.gt",
+        0x65 => "f64.le",
+        0x66 => "f64.ge",
+        
+        // Numeric i32
+        0x67 => "i32.clz",
+        0x68 => "i32.ctz",
+        0x69 => "i32.popcnt",
+        0x6A => "i32.add",
+        0x6B => "i32.sub",
+        0x6C => "i32.mul",
+        0x6D => "i32.div_s",
+        0x6E => "i32.div_u",
+        0x6F => "i32.rem_s",
+        0x70 => "i32.rem_u",
+        0x71 => "i32.and",
+        0x72 => "i32.or",
+        0x73 => "i32.xor",
+        0x74 => "i32.shl",
+        0x75 => "i32.shr_s",
+        0x76 => "i32.shr_u",
+        0x77 => "i32.rotl",
+        0x78 => "i32.rotr",
+        
+        // Numeric i64
+        0x79 => "i64.clz",
+        0x7A => "i64.ctz",
+        0x7B => "i64.popcnt",
+        0x7C => "i64.add",
+        0x7D => "i64.sub",
+        0x7E => "i64.mul",
+        0x7F => "i64.div_s",
+        0x80 => "i64.div_u",
+        0x81 => "i64.rem_s",
+        0x82 => "i64.rem_u",
+        0x83 => "i64.and",
+        0x84 => "i64.or",
+        0x85 => "i64.xor",
+        0x86 => "i64.shl",
+        0x87 => "i64.shr_s",
+        0x88 => "i64.shr_u",
+        0x89 => "i64.rotl",
+        0x8A => "i64.rotr",
+        
+        // Numeric f32
+        0x8B => "f32.abs",
+        0x8C => "f32.neg",
+        0x8D => "f32.ceil",
+        0x8E => "f32.floor",
+        0x8F => "f32.trunc",
+        0x90 => "f32.nearest",
+        0x91 => "f32.sqrt",
+        0x92 => "f32.add",
+        0x93 => "f32.sub",
+        0x94 => "f32.mul",
+        0x95 => "f32.div",
+        0x96 => "f32.min",
+        0x97 => "f32.max",
+        0x98 => "f32.copysign",
+        
+        // Numeric f64
+        0x99 => "f64.abs",
+        0x9A => "f64.neg",
+        0x9B => "f64.ceil",
+        0x9C => "f64.floor",
+        0x9D => "f64.trunc",
+        0x9E => "f64.nearest",
+        0x9F => "f64.sqrt",
+        0xA0 => "f64.add",
+        0xA1 => "f64.sub",
+        0xA2 => "f64.mul",
+        0xA3 => "f64.div",
+        0xA4 => "f64.min",
+        0xA5 => "f64.max",
+        0xA6 => "f64.copysign",
+        
+        // Conversions
+        0xA7 => "i32.wrap_i64",
+        0xA8 => "i32.trunc_f32_s",
+        0xA9 => "i32.trunc_f32_u",
+        0xAA => "i32.trunc_f64_s",
+        0xAB => "i32.trunc_f64_u",
+        0xAC => "i64.extend_i32_s",
+        0xAD => "i64.extend_i32_u",
+        0xAE => "i64.trunc_f32_s",
+        0xAF => "i64.trunc_f32_u",
+        0xB0 => "i64.trunc_f64_s",
+        0xB1 => "i64.trunc_f64_u",
+        0xB2 => "f32.convert_i32_s",
+        0xB3 => "f32.convert_i32_u",
+        0xB4 => "f32.convert_i64_s",
+        0xB5 => "f32.convert_i64_u",
+        0xB6 => "f32.demote_f64",
+        0xB7 => "f64.convert_i32_s",
+        0xB8 => "f64.convert_i32_u",
+        0xB9 => "f64.convert_i64_s",
+        0xBA => "f64.convert_i64_u",
+        0xBB => "f64.promote_f32",
+        0xBC => "i32.reinterpret_f32",
+        0xBD => "i64.reinterpret_f64",
+        0xBE => "f32.reinterpret_i32",
+        0xBF => "f64.reinterpret_i64",
+        
+        // Sign extension
+        0xC0 => "i32.extend8_s",
+        0xC1 => "i32.extend16_s",
+        0xC2 => "i64.extend8_s",
+        0xC3 => "i64.extend16_s",
+        0xC4 => "i64.extend32_s",
+        
+        // FC prefix (extended instructions)
+        0xFC => {
+            if offset + 1 < data.len() {
+                let (subop, len) = read_uleb128(data, offset + 1);
+                consumed += len;
+                match subop {
+                    0 => "i32.trunc_sat_f32_s",
+                    1 => "i32.trunc_sat_f32_u",
+                    2 => "i32.trunc_sat_f64_s",
+                    3 => "i32.trunc_sat_f64_u",
+                    4 => "i64.trunc_sat_f32_s",
+                    5 => "i64.trunc_sat_f32_u",
+                    6 => "i64.trunc_sat_f64_s",
+                    7 => "i64.trunc_sat_f64_u",
+                    8 => { // memory.init
+                        let (dataidx, len1) = read_uleb128(data, offset + consumed);
+                        consumed += len1;
+                        let (memidx, len2) = read_uleb128(data, offset + consumed);
+                        consumed += len2;
+                        operand = format!("data[{}] mem[{}]", dataidx, memidx);
+                        "memory.init"
+                    }
+                    9 => { // data.drop
+                        let (dataidx, len1) = read_uleb128(data, offset + consumed);
+                        consumed += len1;
+                        operand = format!("{}", dataidx);
+                        "data.drop"
+                    }
+                    10 => { // memory.copy
+                        let (dst, len1) = read_uleb128(data, offset + consumed);
+                        consumed += len1;
+                        let (src, len2) = read_uleb128(data, offset + consumed);
+                        consumed += len2;
+                        operand = format!("dst={} src={}", dst, src);
+                        "memory.copy"
+                    }
+                    11 => { // memory.fill
+                        let (memidx, len1) = read_uleb128(data, offset + consumed);
+                        consumed += len1;
+                        operand = format!("{}", memidx);
+                        "memory.fill"
+                    }
+                    _ => "fc_unknown",
+                }
+            } else {
+                "fc_prefix"
+            }
+        }
+        
+        // FD prefix (SIMD)
+        0xFD => {
+            if offset + 1 < data.len() {
+                let (subop, len) = read_uleb128(data, offset + 1);
+                consumed += len;
+                operand = format!("{}", subop);
+            }
+            "simd"
+        }
+        
+        _ => "unknown",
+    };
+    
+    (mnemonic.to_string(), consumed, operand, is_branch, branch_target)
+}
+
+/// Disassemble WASM bytecode with detailed output
+fn disassemble_wasm(memory_data: &[u8], base_address: u64) -> DisassembleResponse {
+    let mut lines = Vec::new();
+    let mut offset: usize = 0;
+    let max_instructions = 500;
+    
+    while offset < memory_data.len() && lines.len() < max_instructions {
+        let (mnemonic, consumed, operand, is_branch, _branch_target) = 
+            decode_wasm_instruction(memory_data, offset, base_address);
+        
+        if consumed == 0 {
+            break;
+        }
+        
+        let current_address = base_address + offset as u64;
+        let end_offset = std::cmp::min(offset + consumed, memory_data.len());
+        
+        // Format bytes (max 8 shown)
+        let bytes_display = memory_data[offset..end_offset]
+            .iter()
+            .take(8)
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let bytes_suffix = if consumed > 8 { ".." } else { "" };
+        
+        // Format branch arrow hint
+        let branch_hint = if is_branch { " <-" } else { "" };
+        
+        // Format: address|bytes|mnemonic operand (pipe-separated for parser)
+        // Only add space before operand if operand is not empty
+        let instruction_text = if operand.is_empty() {
+            format!("{}{}", mnemonic, branch_hint)
+        } else {
+            format!("{} {}{}", mnemonic, operand, branch_hint)
+        };
+        
+        let line = format!(
+            "0x{:08x}|{}{}|{}",
+            current_address,
+            bytes_display,
+            bytes_suffix,
+            instruction_text
+        );
+        lines.push(line);
+        
+        offset += consumed;
+    }
+    
+    DisassembleResponse {
+        success: true,
+        disassembly: Some(lines.join("\n")),
+        instructions_count: lines.len(),
+        error: None,
+    }
+}
+
+// ============================================================================
+// WASM File Analysis with wasmparser
+// ============================================================================
+
+/// WASM module directory for saved .wasm files
+fn get_wasm_modules_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("DynaDbg")
+        .join("wasm_modules")
+}
+
+/// WASM function info from wasmparser analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmFunctionInfo {
+    pub index: u32,
+    pub name: Option<String>,
+    pub code_offset: u32,      // Offset within the Code section
+    pub code_size: u32,        // Size of function body
+    pub local_count: u32,      // Number of locals
+    pub param_count: u32,      // Number of parameters (from type)
+    pub result_count: u32,     // Number of results (from type)
+    pub instructions: Vec<WasmInstructionInfo>,
+}
+
+/// WASM instruction info with structured details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmInstructionInfo {
+    pub offset: u32,           // Byte offset within function
+    pub bytes: Vec<u8>,        // Raw instruction bytes
+    pub mnemonic: String,      // Instruction name
+    pub operands: String,      // Formatted operands
+    pub is_branch: bool,       // Is this a branch/control flow instruction
+    pub depth_change: i32,     // Block nesting change (+1 for block/loop/if, -1 for end)
+}
+
+/// WASM module analysis result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmModuleAnalysis {
+    pub file_path: String,
+    pub functions: Vec<WasmFunctionInfo>,
+    pub import_count: u32,
+    pub export_count: u32,
+    pub memory_count: u32,
+    pub table_count: u32,
+    pub global_count: u32,
+}
+
+/// Save WASM binary data to a .wasm file for Ghidra analysis
+#[tauri::command]
+async fn save_wasm_binary(
+    binary_data: Vec<u8>,
+    module_name: String,
+    project_name: Option<String>,
+) -> Result<String, String> {
+    // Save to ghidra_projects/libraries/{project_name}/ directory (same as native libraries)
+    // This ensures consistency with how native libraries are stored
+    let ghidra_dir = get_ghidra_projects_dir();
+    let libs_dir = if let Some(ref proj_name) = project_name {
+        ghidra_dir.join("libraries").join(proj_name)
+    } else {
+        ghidra_dir.join("libraries")
+    };
+    std::fs::create_dir_all(&libs_dir).map_err(|e| format!("Failed to create libraries directory: {}", e))?;
+    
+    // Sanitize module name for filename
+    let safe_name = module_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect::<String>();
+    
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    
+    let filename = format!("{}_{}.wasm", safe_name, timestamp);
+    let file_path = libs_dir.join(&filename);
+    
+    // Write the WASM binary
+    std::fs::write(&file_path, &binary_data)
+        .map_err(|e| format!("Failed to write WASM file: {}", e))?;
+    
+    let path_str = file_path.to_string_lossy().to_string();
+    println!("[WASM] Saved WASM binary to: {} ({} bytes)", path_str, binary_data.len());
+    
+    Ok(path_str)
+}
+
+/// Get saved WASM files list
+#[tauri::command]
+async fn list_wasm_files() -> Result<Vec<String>, String> {
+    let wasm_dir = get_wasm_modules_dir();
+    
+    if !wasm_dir.exists() {
+        return Ok(Vec::new());
+    }
+    
+    let entries = std::fs::read_dir(&wasm_dir)
+        .map_err(|e| format!("Failed to read WASM directory: {}", e))?;
+    
+    let mut files = Vec::new();
+    for entry in entries {
+        if let Ok(entry) = entry {
+            let path = entry.path();
+            if path.extension().map(|e| e == "wasm").unwrap_or(false) {
+                files.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    
+    files.sort();
+    Ok(files)
+}
+
+/// Format a wasmparser Operator to mnemonic and operands
+fn format_wasm_operator(op: &Operator) -> (String, String, bool, i32) {
+    use Operator::*;
+    
+    match op {
+        // Control flow
+        Unreachable => ("unreachable".into(), "".into(), false, 0),
+        Nop => ("nop".into(), "".into(), false, 0),
+        Block { blockty } => ("block".into(), format!("{:?}", blockty), false, 1),
+        Loop { blockty } => ("loop".into(), format!("{:?}", blockty), true, 1),
+        If { blockty } => ("if".into(), format!("{:?}", blockty), true, 1),
+        Else => ("else".into(), "".into(), false, 0),
+        End => ("end".into(), "".into(), false, -1),
+        Br { relative_depth } => ("br".into(), format!("{}", relative_depth), true, 0),
+        BrIf { relative_depth } => ("br_if".into(), format!("{}", relative_depth), true, 0),
+        BrTable { targets } => ("br_table".into(), format!("{} targets", targets.len()), true, 0),
+        Return => ("return".into(), "".into(), true, 0),
+        Call { function_index } => ("call".into(), format!("func[{}]", function_index), true, 0),
+        CallIndirect { type_index, table_index } => 
+            ("call_indirect".into(), format!("type[{}] table[{}]", type_index, table_index), true, 0),
+        
+        // Parametric
+        Drop => ("drop".into(), "".into(), false, 0),
+        Select => ("select".into(), "".into(), false, 0),
+        
+        // Variable access
+        LocalGet { local_index } => ("local.get".into(), format!("{}", local_index), false, 0),
+        LocalSet { local_index } => ("local.set".into(), format!("{}", local_index), false, 0),
+        LocalTee { local_index } => ("local.tee".into(), format!("{}", local_index), false, 0),
+        GlobalGet { global_index } => ("global.get".into(), format!("{}", global_index), false, 0),
+        GlobalSet { global_index } => ("global.set".into(), format!("{}", global_index), false, 0),
+        
+        // Memory operations
+        I32Load { memarg } => ("i32.load".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        I64Load { memarg } => ("i64.load".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        F32Load { memarg } => ("f32.load".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        F64Load { memarg } => ("f64.load".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        I32Load8S { memarg } => ("i32.load8_s".into(), format!("offset={}", memarg.offset), false, 0),
+        I32Load8U { memarg } => ("i32.load8_u".into(), format!("offset={}", memarg.offset), false, 0),
+        I32Load16S { memarg } => ("i32.load16_s".into(), format!("offset={}", memarg.offset), false, 0),
+        I32Load16U { memarg } => ("i32.load16_u".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Load8S { memarg } => ("i64.load8_s".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Load8U { memarg } => ("i64.load8_u".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Load16S { memarg } => ("i64.load16_s".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Load16U { memarg } => ("i64.load16_u".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Load32S { memarg } => ("i64.load32_s".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Load32U { memarg } => ("i64.load32_u".into(), format!("offset={}", memarg.offset), false, 0),
+        I32Store { memarg } => ("i32.store".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        I64Store { memarg } => ("i64.store".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        F32Store { memarg } => ("f32.store".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        F64Store { memarg } => ("f64.store".into(), format!("offset={} align={}", memarg.offset, memarg.align), false, 0),
+        I32Store8 { memarg } => ("i32.store8".into(), format!("offset={}", memarg.offset), false, 0),
+        I32Store16 { memarg } => ("i32.store16".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Store8 { memarg } => ("i64.store8".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Store16 { memarg } => ("i64.store16".into(), format!("offset={}", memarg.offset), false, 0),
+        I64Store32 { memarg } => ("i64.store32".into(), format!("offset={}", memarg.offset), false, 0),
+        MemorySize { mem, .. } => ("memory.size".into(), format!("{}", mem), false, 0),
+        MemoryGrow { mem, .. } => ("memory.grow".into(), format!("{}", mem), false, 0),
+        
+        // Constants
+        I32Const { value } => ("i32.const".into(), format!("{}", value), false, 0),
+        I64Const { value } => ("i64.const".into(), format!("{}", value), false, 0),
+        F32Const { value } => ("f32.const".into(), format!("{:?}", value), false, 0),
+        F64Const { value } => ("f64.const".into(), format!("{:?}", value), false, 0),
+        
+        // Comparison
+        I32Eqz => ("i32.eqz".into(), "".into(), false, 0),
+        I32Eq => ("i32.eq".into(), "".into(), false, 0),
+        I32Ne => ("i32.ne".into(), "".into(), false, 0),
+        I32LtS => ("i32.lt_s".into(), "".into(), false, 0),
+        I32LtU => ("i32.lt_u".into(), "".into(), false, 0),
+        I32GtS => ("i32.gt_s".into(), "".into(), false, 0),
+        I32GtU => ("i32.gt_u".into(), "".into(), false, 0),
+        I32LeS => ("i32.le_s".into(), "".into(), false, 0),
+        I32LeU => ("i32.le_u".into(), "".into(), false, 0),
+        I32GeS => ("i32.ge_s".into(), "".into(), false, 0),
+        I32GeU => ("i32.ge_u".into(), "".into(), false, 0),
+        I64Eqz => ("i64.eqz".into(), "".into(), false, 0),
+        I64Eq => ("i64.eq".into(), "".into(), false, 0),
+        I64Ne => ("i64.ne".into(), "".into(), false, 0),
+        I64LtS => ("i64.lt_s".into(), "".into(), false, 0),
+        I64LtU => ("i64.lt_u".into(), "".into(), false, 0),
+        I64GtS => ("i64.gt_s".into(), "".into(), false, 0),
+        I64GtU => ("i64.gt_u".into(), "".into(), false, 0),
+        I64LeS => ("i64.le_s".into(), "".into(), false, 0),
+        I64LeU => ("i64.le_u".into(), "".into(), false, 0),
+        I64GeS => ("i64.ge_s".into(), "".into(), false, 0),
+        I64GeU => ("i64.ge_u".into(), "".into(), false, 0),
+        F32Eq => ("f32.eq".into(), "".into(), false, 0),
+        F32Ne => ("f32.ne".into(), "".into(), false, 0),
+        F32Lt => ("f32.lt".into(), "".into(), false, 0),
+        F32Gt => ("f32.gt".into(), "".into(), false, 0),
+        F32Le => ("f32.le".into(), "".into(), false, 0),
+        F32Ge => ("f32.ge".into(), "".into(), false, 0),
+        F64Eq => ("f64.eq".into(), "".into(), false, 0),
+        F64Ne => ("f64.ne".into(), "".into(), false, 0),
+        F64Lt => ("f64.lt".into(), "".into(), false, 0),
+        F64Gt => ("f64.gt".into(), "".into(), false, 0),
+        F64Le => ("f64.le".into(), "".into(), false, 0),
+        F64Ge => ("f64.ge".into(), "".into(), false, 0),
+        
+        // Arithmetic
+        I32Clz => ("i32.clz".into(), "".into(), false, 0),
+        I32Ctz => ("i32.ctz".into(), "".into(), false, 0),
+        I32Popcnt => ("i32.popcnt".into(), "".into(), false, 0),
+        I32Add => ("i32.add".into(), "".into(), false, 0),
+        I32Sub => ("i32.sub".into(), "".into(), false, 0),
+        I32Mul => ("i32.mul".into(), "".into(), false, 0),
+        I32DivS => ("i32.div_s".into(), "".into(), false, 0),
+        I32DivU => ("i32.div_u".into(), "".into(), false, 0),
+        I32RemS => ("i32.rem_s".into(), "".into(), false, 0),
+        I32RemU => ("i32.rem_u".into(), "".into(), false, 0),
+        I32And => ("i32.and".into(), "".into(), false, 0),
+        I32Or => ("i32.or".into(), "".into(), false, 0),
+        I32Xor => ("i32.xor".into(), "".into(), false, 0),
+        I32Shl => ("i32.shl".into(), "".into(), false, 0),
+        I32ShrS => ("i32.shr_s".into(), "".into(), false, 0),
+        I32ShrU => ("i32.shr_u".into(), "".into(), false, 0),
+        I32Rotl => ("i32.rotl".into(), "".into(), false, 0),
+        I32Rotr => ("i32.rotr".into(), "".into(), false, 0),
+        I64Clz => ("i64.clz".into(), "".into(), false, 0),
+        I64Ctz => ("i64.ctz".into(), "".into(), false, 0),
+        I64Popcnt => ("i64.popcnt".into(), "".into(), false, 0),
+        I64Add => ("i64.add".into(), "".into(), false, 0),
+        I64Sub => ("i64.sub".into(), "".into(), false, 0),
+        I64Mul => ("i64.mul".into(), "".into(), false, 0),
+        I64DivS => ("i64.div_s".into(), "".into(), false, 0),
+        I64DivU => ("i64.div_u".into(), "".into(), false, 0),
+        I64RemS => ("i64.rem_s".into(), "".into(), false, 0),
+        I64RemU => ("i64.rem_u".into(), "".into(), false, 0),
+        I64And => ("i64.and".into(), "".into(), false, 0),
+        I64Or => ("i64.or".into(), "".into(), false, 0),
+        I64Xor => ("i64.xor".into(), "".into(), false, 0),
+        I64Shl => ("i64.shl".into(), "".into(), false, 0),
+        I64ShrS => ("i64.shr_s".into(), "".into(), false, 0),
+        I64ShrU => ("i64.shr_u".into(), "".into(), false, 0),
+        I64Rotl => ("i64.rotl".into(), "".into(), false, 0),
+        I64Rotr => ("i64.rotr".into(), "".into(), false, 0),
+        F32Abs => ("f32.abs".into(), "".into(), false, 0),
+        F32Neg => ("f32.neg".into(), "".into(), false, 0),
+        F32Ceil => ("f32.ceil".into(), "".into(), false, 0),
+        F32Floor => ("f32.floor".into(), "".into(), false, 0),
+        F32Trunc => ("f32.trunc".into(), "".into(), false, 0),
+        F32Nearest => ("f32.nearest".into(), "".into(), false, 0),
+        F32Sqrt => ("f32.sqrt".into(), "".into(), false, 0),
+        F32Add => ("f32.add".into(), "".into(), false, 0),
+        F32Sub => ("f32.sub".into(), "".into(), false, 0),
+        F32Mul => ("f32.mul".into(), "".into(), false, 0),
+        F32Div => ("f32.div".into(), "".into(), false, 0),
+        F32Min => ("f32.min".into(), "".into(), false, 0),
+        F32Max => ("f32.max".into(), "".into(), false, 0),
+        F32Copysign => ("f32.copysign".into(), "".into(), false, 0),
+        F64Abs => ("f64.abs".into(), "".into(), false, 0),
+        F64Neg => ("f64.neg".into(), "".into(), false, 0),
+        F64Ceil => ("f64.ceil".into(), "".into(), false, 0),
+        F64Floor => ("f64.floor".into(), "".into(), false, 0),
+        F64Trunc => ("f64.trunc".into(), "".into(), false, 0),
+        F64Nearest => ("f64.nearest".into(), "".into(), false, 0),
+        F64Sqrt => ("f64.sqrt".into(), "".into(), false, 0),
+        F64Add => ("f64.add".into(), "".into(), false, 0),
+        F64Sub => ("f64.sub".into(), "".into(), false, 0),
+        F64Mul => ("f64.mul".into(), "".into(), false, 0),
+        F64Div => ("f64.div".into(), "".into(), false, 0),
+        F64Min => ("f64.min".into(), "".into(), false, 0),
+        F64Max => ("f64.max".into(), "".into(), false, 0),
+        F64Copysign => ("f64.copysign".into(), "".into(), false, 0),
+        
+        // Conversions
+        I32WrapI64 => ("i32.wrap_i64".into(), "".into(), false, 0),
+        I32TruncF32S => ("i32.trunc_f32_s".into(), "".into(), false, 0),
+        I32TruncF32U => ("i32.trunc_f32_u".into(), "".into(), false, 0),
+        I32TruncF64S => ("i32.trunc_f64_s".into(), "".into(), false, 0),
+        I32TruncF64U => ("i32.trunc_f64_u".into(), "".into(), false, 0),
+        I64ExtendI32S => ("i64.extend_i32_s".into(), "".into(), false, 0),
+        I64ExtendI32U => ("i64.extend_i32_u".into(), "".into(), false, 0),
+        I64TruncF32S => ("i64.trunc_f32_s".into(), "".into(), false, 0),
+        I64TruncF32U => ("i64.trunc_f32_u".into(), "".into(), false, 0),
+        I64TruncF64S => ("i64.trunc_f64_s".into(), "".into(), false, 0),
+        I64TruncF64U => ("i64.trunc_f64_u".into(), "".into(), false, 0),
+        F32ConvertI32S => ("f32.convert_i32_s".into(), "".into(), false, 0),
+        F32ConvertI32U => ("f32.convert_i32_u".into(), "".into(), false, 0),
+        F32ConvertI64S => ("f32.convert_i64_s".into(), "".into(), false, 0),
+        F32ConvertI64U => ("f32.convert_i64_u".into(), "".into(), false, 0),
+        F32DemoteF64 => ("f32.demote_f64".into(), "".into(), false, 0),
+        F64ConvertI32S => ("f64.convert_i32_s".into(), "".into(), false, 0),
+        F64ConvertI32U => ("f64.convert_i32_u".into(), "".into(), false, 0),
+        F64ConvertI64S => ("f64.convert_i64_s".into(), "".into(), false, 0),
+        F64ConvertI64U => ("f64.convert_i64_u".into(), "".into(), false, 0),
+        F64PromoteF32 => ("f64.promote_f32".into(), "".into(), false, 0),
+        I32ReinterpretF32 => ("i32.reinterpret_f32".into(), "".into(), false, 0),
+        I64ReinterpretF64 => ("i64.reinterpret_f64".into(), "".into(), false, 0),
+        F32ReinterpretI32 => ("f32.reinterpret_i32".into(), "".into(), false, 0),
+        F64ReinterpretI64 => ("f64.reinterpret_i64".into(), "".into(), false, 0),
+        
+        // Sign extension
+        I32Extend8S => ("i32.extend8_s".into(), "".into(), false, 0),
+        I32Extend16S => ("i32.extend16_s".into(), "".into(), false, 0),
+        I64Extend8S => ("i64.extend8_s".into(), "".into(), false, 0),
+        I64Extend16S => ("i64.extend16_s".into(), "".into(), false, 0),
+        I64Extend32S => ("i64.extend32_s".into(), "".into(), false, 0),
+        
+        // Reference types
+        RefNull { hty } => ("ref.null".into(), format!("{:?}", hty), false, 0),
+        RefIsNull => ("ref.is_null".into(), "".into(), false, 0),
+        RefFunc { function_index } => ("ref.func".into(), format!("{}", function_index), false, 0),
+        
+        // Catch-all for other instructions
+        _ => ("unknown".into(), format!("{:?}", op), false, 0),
+    }
+}
+
+/// Analyze WASM binary using wasmparser for structured disassembly
+#[tauri::command]
+async fn analyze_wasm_binary(
+    binary_data: Vec<u8>,
+    _base_address: u64,
+) -> Result<WasmModuleAnalysis, String> {
+    let parser = Parser::new(0);
+    let mut functions: Vec<WasmFunctionInfo> = Vec::new();
+    let mut import_count = 0u32;
+    let mut export_count = 0u32;
+    let mut memory_count = 0u32;
+    let mut table_count = 0u32;
+    let mut global_count = 0u32;
+    let mut type_section_types: Vec<(u32, u32)> = Vec::new(); // (params, results)
+    let mut function_type_indices: Vec<u32> = Vec::new();
+    let mut func_index = 0u32;
+    
+    for payload in parser.parse_all(&binary_data) {
+        match payload {
+            Ok(Payload::TypeSection(reader)) => {
+                for ty in reader.into_iter_err_on_gc_types() {
+                    match ty {
+                        Ok(ft) => {
+                            type_section_types.push((
+                                ft.params().len() as u32,
+                                ft.results().len() as u32,
+                            ));
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            Ok(Payload::ImportSection(reader)) => {
+                for import in reader {
+                    if let Ok(imp) = import {
+                        import_count += 1;
+                        if matches!(imp.ty, wasmparser::TypeRef::Func(_)) {
+                            func_index += 1;
+                        }
+                    }
+                }
+            }
+            Ok(Payload::FunctionSection(reader)) => {
+                for func_type in reader {
+                    if let Ok(type_idx) = func_type {
+                        function_type_indices.push(type_idx);
+                    }
+                }
+            }
+            Ok(Payload::TableSection(reader)) => {
+                table_count = reader.count();
+            }
+            Ok(Payload::MemorySection(reader)) => {
+                memory_count = reader.count();
+            }
+            Ok(Payload::GlobalSection(reader)) => {
+                global_count = reader.count();
+            }
+            Ok(Payload::ExportSection(reader)) => {
+                export_count = reader.count();
+            }
+            Ok(Payload::CodeSectionEntry(body)) => {
+                let code_offset = body.range().start as u32;
+                let code_size = body.range().len() as u32;
+                
+                // Get type info
+                let local_func_idx = (func_index - import_count) as usize;
+                let (param_count, result_count) = if local_func_idx < function_type_indices.len() {
+                    let type_idx = function_type_indices[local_func_idx] as usize;
+                    if type_idx < type_section_types.len() {
+                        type_section_types[type_idx]
+                    } else {
+                        (0, 0)
+                    }
+                } else {
+                    (0, 0)
+                };
+                
+                // Count locals
+                let mut local_count = 0u32;
+                if let Ok(locals_reader) = body.get_locals_reader() {
+                    for local in locals_reader {
+                        if let Ok((count, _)) = local {
+                            local_count += count;
+                        }
+                    }
+                }
+                
+                // Parse instructions
+                let mut instructions = Vec::new();
+                if let Ok(ops_reader) = body.get_operators_reader() {
+                    let mut reader = ops_reader;
+                    let base_offset = body.range().start;
+                    
+                    while !reader.eof() {
+                        let pos_before = reader.original_position();
+                        match reader.read() {
+                            Ok(op) => {
+                                let pos_after = reader.original_position();
+                                let _instr_size = pos_after - pos_before;
+                                let instr_offset = pos_before - base_offset;
+                                
+                                // Get raw bytes
+                                let bytes = if pos_before < binary_data.len() && pos_after <= binary_data.len() {
+                                    binary_data[pos_before..pos_after].to_vec()
+                                } else {
+                                    vec![]
+                                };
+                                
+                                let (mnemonic, operands, is_branch, depth_change) = format_wasm_operator(&op);
+                                
+                                instructions.push(WasmInstructionInfo {
+                                    offset: instr_offset as u32,
+                                    bytes,
+                                    mnemonic,
+                                    operands,
+                                    is_branch,
+                                    depth_change,
+                                });
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                
+                functions.push(WasmFunctionInfo {
+                    index: func_index,
+                    name: None, // Will be filled from name section if available
+                    code_offset,
+                    code_size,
+                    local_count,
+                    param_count,
+                    result_count,
+                    instructions,
+                });
+                
+                func_index += 1;
+            }
+            Ok(Payload::CustomSection(reader)) => {
+                if reader.name() == "name" {
+                    // Parse name section for function names
+                    // This is optional and may not be present
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    Ok(WasmModuleAnalysis {
+        file_path: String::new(),
+        functions,
+        import_count,
+        export_count,
+        memory_count,
+        table_count,
+        global_count,
+    })
+}
+
+/// Disassemble a specific WASM function with wasmparser-based analysis
+#[tauri::command]
+async fn disassemble_wasm_function(
+    binary_data: Vec<u8>,
+    function_offset: u32,
+    function_size: u32,
+    base_address: u64,
+) -> Result<DisassembleResponse, String> {
+    // Validate offset and size
+    if function_offset as usize >= binary_data.len() {
+        return Err("Function offset out of bounds".to_string());
+    }
+    
+    let end_offset = std::cmp::min(
+        function_offset as usize + function_size as usize,
+        binary_data.len()
+    );
+    
+    let function_bytes = &binary_data[function_offset as usize..end_offset];
+    
+    // Try to parse as function body
+    let mut lines = Vec::new();
+    let mut offset = 0usize;
+    let mut block_depth = 0i32;
+    
+    // Skip locals encoding if present (for raw function bodies)
+    // First, read local count as LEB128
+    let (local_groups, consumed) = read_uleb128(function_bytes, 0);
+    offset += consumed;
+    
+    // Skip local declarations
+    for _ in 0..local_groups {
+        let (_count, c1) = read_uleb128(function_bytes, offset);
+        offset += c1;
+        if offset < function_bytes.len() {
+            offset += 1; // Skip type byte
+        }
+    }
+    
+    // Now decode instructions
+    while offset < function_bytes.len() && lines.len() < 500 {
+        let (mnemonic, consumed, operand, is_branch, _) = 
+            decode_wasm_instruction(function_bytes, offset, base_address);
+        
+        if consumed == 0 {
+            break;
+        }
+        
+        // Track block depth for indentation
+        let indent = if mnemonic == "end" || mnemonic == "else" {
+            block_depth = (block_depth - 1).max(0);
+            "  ".repeat(block_depth as usize)
+        } else {
+            let indent = "  ".repeat(block_depth as usize);
+            if mnemonic == "block" || mnemonic == "loop" || mnemonic == "if" {
+                block_depth += 1;
+            }
+            indent
+        };
+        
+        let current_address = base_address + (function_offset as u64) + (offset as u64);
+        let end_off = std::cmp::min(offset + consumed, function_bytes.len());
+        
+        let bytes_display = function_bytes[offset..end_off]
+            .iter()
+            .take(8)
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let bytes_suffix = if consumed > 8 { ".." } else { "" };
+        let branch_hint = if is_branch { " <-" } else { "" };
+        
+        // Only add space before operand if operand is not empty
+        let instruction_text = if operand.is_empty() {
+            format!("{}{}{}", indent, mnemonic, branch_hint)
+        } else {
+            format!("{}{} {}{}", indent, mnemonic, operand, branch_hint)
+        };
+        
+        let line = format!(
+            "0x{:08x}|{}{}|{}",
+            current_address,
+            bytes_display,
+            bytes_suffix,
+            instruction_text
+        );
+        lines.push(line);
+        
+        offset += consumed;
+        
+        // Stop at function end
+        if mnemonic == "end" && block_depth == 0 {
+            break;
+        }
+    }
+    
+    Ok(DisassembleResponse {
+        success: true,
+        disassembly: Some(lines.join("\n")),
+        instructions_count: lines.len(),
+        error: None,
+    })
+}
+
+/// Open WASM modules directory in file explorer
+#[tauri::command]
+async fn open_wasm_modules_directory() -> Result<String, String> {
+    let wasm_dir = get_wasm_modules_dir();
+    std::fs::create_dir_all(&wasm_dir).map_err(|e| format!("Failed to create directory: {}", e))?;
+    
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(&wasm_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open explorer: {}", e))?;
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&wasm_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open Finder: {}", e))?;
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&wasm_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {}", e))?;
+    }
+    
+    Ok(wasm_dir.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 async fn disassemble_memory_direct(
     memory_data: Vec<u8>,
@@ -1615,8 +2985,14 @@ async fn disassemble_memory_direct(
     let instruction_size: usize = match architecture.as_str() {
         "arm64" | "aarch64" | "arm" => 4,
         "x86" | "x86_64" => 1, // x86 is variable length, use 1 for fallback
+        "wasm32" | "wasm" => 1, // WASM is variable length
         _ => 4,
     };
+
+    // Handle WASM architecture specially (no Capstone support)
+    if architecture == "wasm32" || architecture == "wasm" {
+        return Ok(disassemble_wasm(&memory_data, address));
+    }
 
     // Create capstone engine with proper architecture support
     let cs = match architecture.as_str() {
@@ -2316,18 +3692,21 @@ with open(r"{}", "w") as f:
         .await
         .map_err(|e| format!("Failed to write decompile script: {}", e))?;
     
-    // Clean library name (remove .dll, .so, etc.)
+    // Clean library name (without extension)
+    // Ghidra stores imported programs with file_stem (no extension) as the program name
     let clean_lib_name = PathBuf::from(&library_name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or(library_name.clone());
     
     // Run Ghidra with the decompile script
+    // Use clean_lib_name (without extension) for -process option
+    // Ghidra stores imported programs without file extensions
     let output = hide_console_window(&mut Command::new(&analyzer_path))
         .arg(&project_path)
         .arg(&clean_lib_name)
         .arg("-process")
-        .arg(&library_name)
+        .arg(&clean_lib_name)
         .arg("-noanalysis")
         .arg("-postScript")
         .arg(script_path.to_string_lossy().to_string())
@@ -3413,18 +4792,21 @@ async fn start_ghidra_server(
         .await
         .map_err(|e| format!("Failed to write server script: {}", e))?;
     
-    // Clean library name
+    // Clean library name (without extension)
+    // Ghidra stores imported programs with file_stem (no extension) as the program name
     let clean_lib_name = PathBuf::from(&library_name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or(library_name.clone());
     
     // Start Ghidra with the server script (non-blocking)
+    // Use clean_lib_name (without extension) for -process option
+    // Ghidra stores imported programs without file extensions
     let mut child = hide_console_window(&mut Command::new(&analyzer_path))
         .arg(&project_path)
         .arg(&clean_lib_name)
         .arg("-process")
-        .arg(&library_name)
+        .arg(&clean_lib_name)
         .arg("-noanalysis")
         .arg("-postScript")
         .arg(script_path.to_string_lossy().to_string())
@@ -3847,15 +5229,9 @@ async fn ghidra_analyze_reachability(
     }
     
     // Clean library name for Ghidra project (stem without extension)
+    // Ghidra stores imported programs with file_stem (no extension) as the program name
     let clean_lib_name = PathBuf::from(&library_name)
         .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or(library_name.clone());
-    
-    // Get just the filename (without path) for -process option
-    // Ghidra's -process option does not accept paths with '/'
-    let process_filename = PathBuf::from(&library_name)
-        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or(library_name.clone());
     
@@ -3863,6 +5239,7 @@ async fn ghidra_analyze_reachability(
     // Format: analyzeHeadless <project> <name> -process <file> -noanalysis 
     //         -scriptPath <dir> -preScript <script> <arg1> <arg2> <arg3>
     // Each argument must be a separate command-line argument
+    // Use clean_lib_name (without extension) for -process option
     let script_name = script_path.file_name().unwrap().to_string_lossy().to_string();
     let script_dir = script_path.parent().unwrap_or(&script_path).to_string_lossy().to_string();
     
@@ -3870,7 +5247,7 @@ async fn ghidra_analyze_reachability(
         .arg(&project_path)
         .arg(&clean_lib_name)
         .arg("-process")
-        .arg(&process_filename)
+        .arg(&clean_lib_name)
         .arg("-noanalysis")
         .arg("-readOnly")
         .arg("-scriptPath")
@@ -4058,16 +5435,20 @@ with open(r"{}", "w") as f:
         .await
         .map_err(|e| format!("Failed to write xref script: {}", e))?;
     
+    // Clean library name (without extension)
+    // Ghidra stores imported programs with file_stem (no extension) as the program name
     let clean_lib_name = PathBuf::from(&library_name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or(library_name.clone());
     
+    // Use clean_lib_name (without extension) for -process option
+    // Ghidra stores imported programs without file extensions
     let output = hide_console_window(&mut Command::new(&analyzer_path))
         .arg(&project_path)
         .arg(&clean_lib_name)
         .arg("-process")
-        .arg(&library_name)
+        .arg(&clean_lib_name)
         .arg("-noanalysis")
         .arg("-postScript")
         .arg(script_path.to_string_lossy().to_string())
@@ -4223,16 +5604,20 @@ with codecs.open(r"{}", "w", "utf-8") as f:
         .await
         .map_err(|e| format!("Failed to write functions script: {}", e))?;
     
+    // Clean library name (without extension)
+    // Ghidra stores imported programs with file_stem (no extension) as the program name
     let clean_lib_name = PathBuf::from(&library_name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or(library_name.clone());
     
+    // Use clean_lib_name (without extension) for -process option
+    // Ghidra stores imported programs without file extensions
     let output = hide_console_window(&mut Command::new(&analyzer_path))
         .arg(&project_path)
         .arg(&clean_lib_name)
         .arg("-process")
-        .arg(&library_name)
+        .arg(&clean_lib_name)
         .arg("-noanalysis")
         .arg("-postScript")
         .arg(script_path.to_string_lossy().to_string())
@@ -4907,7 +6292,13 @@ pub fn run() {
             ghidra_server_data,
             ghidra_analyze_reachability,
             read_local_text_file,
-            select_folder_dialog
+            select_folder_dialog,
+            // WASM analysis commands
+            save_wasm_binary,
+            list_wasm_files,
+            analyze_wasm_binary,
+            disassemble_wasm_function,
+            open_wasm_modules_directory
         ])
         .setup(|app| {
             if let Err(e) = init_ghidra_db() {

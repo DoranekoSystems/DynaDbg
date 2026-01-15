@@ -7,6 +7,8 @@ use std::ffi::{CStr, CString};
 use std::io::{BufRead, BufReader, Error};
 use std::sync::OnceLock;
 
+use crate::wasm_bridge;
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use crate::macho_bridge;
 
@@ -514,12 +516,90 @@ pub fn read_process_memory(
     size: usize,
     buffer: &mut [u8],
 ) -> Result<isize, Error> {
-    let result =
-        unsafe { read_memory_native(pid, address as libc::uintptr_t, size, buffer.as_mut_ptr()) };
-    if result >= 0 {
-        Ok(result as isize)
+    // Check if WASM mode is enabled
+    if wasm_bridge::is_wasm_mode() {
+        // If base address is found, use native memory with offset
+        if wasm_bridge::is_wasm_base_found() {
+            let native_addr = wasm_bridge::wasm_to_native_address(address as usize);
+            let result = unsafe { 
+                read_memory_native(pid, native_addr as libc::uintptr_t, size, buffer.as_mut_ptr()) 
+            };
+            if result >= 0 {
+                return Ok(result as isize);
+            } else {
+                return Err(Error::last_os_error());
+            }
+        }
+        // Fallback to WebSocket if base not found
+        match wasm_bridge::read_wasm_memory_sync(address as usize, size) {
+            Ok(data) => {
+                let copy_len = std::cmp::min(data.len(), buffer.len());
+                buffer[..copy_len].copy_from_slice(&data[..copy_len]);
+                Ok(copy_len as isize)
+            }
+            Err(e) => {
+                log::error!("WASM read_memory failed: {}", e);
+                Err(Error::new(std::io::ErrorKind::Other, e))
+            }
+        }
     } else {
-        Err(Error::last_os_error())
+        let result =
+            unsafe { read_memory_native(pid, address as libc::uintptr_t, size, buffer.as_mut_ptr()) };
+        if result >= 0 {
+            Ok(result as isize)
+        } else {
+            Err(Error::last_os_error())
+        }
+    }
+}
+
+/// Read process memory with explicit tokio handle (for use from rayon/thread pools)
+pub fn read_process_memory_with_handle(
+    pid: i32,
+    address: *mut libc::c_void,
+    size: usize,
+    buffer: &mut [u8],
+    tokio_handle: Option<&tokio::runtime::Handle>,
+) -> Result<isize, Error> {
+    // Check if WASM mode is enabled
+    if wasm_bridge::is_wasm_mode() {
+        // If base address is found, use native memory with offset
+        if wasm_bridge::is_wasm_base_found() {
+            let native_addr = wasm_bridge::wasm_to_native_address(address as usize);
+            let result = unsafe { 
+                read_memory_native(pid, native_addr as libc::uintptr_t, size, buffer.as_mut_ptr()) 
+            };
+            if result >= 0 {
+                return Ok(result as isize);
+            } else {
+                return Err(Error::last_os_error());
+            }
+        }
+        // Fallback to WebSocket if base not found - use provided handle
+        let result = if let Some(handle) = tokio_handle {
+            wasm_bridge::read_wasm_memory_sync_with_handle(address as usize, size, handle)
+        } else {
+            wasm_bridge::read_wasm_memory_sync(address as usize, size)
+        };
+        match result {
+            Ok(data) => {
+                let copy_len = std::cmp::min(data.len(), buffer.len());
+                buffer[..copy_len].copy_from_slice(&data[..copy_len]);
+                Ok(copy_len as isize)
+            }
+            Err(e) => {
+                log::error!("WASM read_memory failed: {}", e);
+                Err(Error::new(std::io::ErrorKind::Other, e))
+            }
+        }
+    } else {
+        let result =
+            unsafe { read_memory_native(pid, address as libc::uintptr_t, size, buffer.as_mut_ptr()) };
+        if result >= 0 {
+            Ok(result as isize)
+        } else {
+            Err(Error::last_os_error())
+        }
     }
 }
 
@@ -530,19 +610,53 @@ pub fn read_process_memory_with_method(
     buffer: &mut [u8],
     mode: i32,
 ) -> Result<isize, Error> {
-    let result = unsafe {
-        read_memory_native_with_method(
-            pid,
-            address as libc::uintptr_t,
-            size,
-            buffer.as_mut_ptr(),
-            mode,
-        )
-    };
-    if result >= 0 {
-        Ok(result as isize)
+    // Check if WASM mode is enabled
+    if wasm_bridge::is_wasm_mode() {
+        // If base address is found, use native memory with offset
+        if wasm_bridge::is_wasm_base_found() {
+            let native_addr = wasm_bridge::wasm_to_native_address(address as usize);
+            let result = unsafe { 
+                read_memory_native_with_method(
+                    pid, 
+                    native_addr as libc::uintptr_t, 
+                    size, 
+                    buffer.as_mut_ptr(),
+                    mode
+                ) 
+            };
+            if result >= 0 {
+                return Ok(result as isize);
+            } else {
+                return Err(Error::last_os_error());
+            }
+        }
+        // Fallback to WebSocket if base not found
+        match wasm_bridge::read_wasm_memory_sync(address as usize, size) {
+            Ok(data) => {
+                let copy_len = std::cmp::min(data.len(), buffer.len());
+                buffer[..copy_len].copy_from_slice(&data[..copy_len]);
+                Ok(copy_len as isize)
+            }
+            Err(e) => {
+                log::error!("WASM read_memory failed: {}", e);
+                Err(Error::new(std::io::ErrorKind::Other, e))
+            }
+        }
     } else {
-        Err(Error::last_os_error())
+        let result = unsafe {
+            read_memory_native_with_method(
+                pid,
+                address as libc::uintptr_t,
+                size,
+                buffer.as_mut_ptr(),
+                mode,
+            )
+        };
+        if result >= 0 {
+            Ok(result as isize)
+        } else {
+            Err(Error::last_os_error())
+        }
     }
 }
 
@@ -552,12 +666,42 @@ pub fn write_process_memory(
     size: usize,
     buffer: &[u8],
 ) -> Result<isize, Error> {
-    let result =
-        unsafe { write_memory_native(pid, address as libc::uintptr_t, size, buffer.as_ptr()) };
-    if result >= 0 {
-        Ok(result as isize)
+    // Check if WASM mode is enabled
+    if wasm_bridge::is_wasm_mode() {
+        // If base address is found, use native memory with offset
+        if wasm_bridge::is_wasm_base_found() {
+            let native_addr = wasm_bridge::wasm_to_native_address(address as usize);
+            let result = unsafe { 
+                write_memory_native(pid, native_addr as libc::uintptr_t, size, buffer.as_ptr()) 
+            };
+            if result >= 0 {
+                return Ok(result as isize);
+            } else {
+                return Err(Error::last_os_error());
+            }
+        }
+        // Fallback to WebSocket if base not found
+        match wasm_bridge::write_wasm_memory_sync(address as usize, buffer) {
+            Ok(success) => {
+                if success {
+                    Ok(size as isize)
+                } else {
+                    Err(Error::new(std::io::ErrorKind::Other, "WASM write failed"))
+                }
+            }
+            Err(e) => {
+                log::error!("WASM write_memory failed: {}", e);
+                Err(Error::new(std::io::ErrorKind::Other, e))
+            }
+        }
     } else {
-        Err(Error::last_os_error())
+        let result =
+            unsafe { write_memory_native(pid, address as libc::uintptr_t, size, buffer.as_ptr()) };
+        if result >= 0 {
+            Ok(result as isize)
+        } else {
+            Err(Error::last_os_error())
+        }
     }
 }
 

@@ -149,6 +149,8 @@ export function ProcessManager({ onModulesUpdate }: ProcessManagerProps) {
   const connected = system.serverConnected;
   const attachedProcess = system.attachedProcess;
   const attachedAppInfo = system.attachedAppInfo;
+  const serverInfo = system.serverInfo;
+  const isWasmMode = serverInfo?.mode === "wasm";
 
   const isCompactHeight = useMediaQuery("(max-height: 800px)");
   const [processes, setProcesses] = useState<ProcessInfo[]>([]);
@@ -444,7 +446,14 @@ export function ProcessManager({ onModulesUpdate }: ProcessManagerProps) {
     console.log("All debug state cleared due to process detach");
   };
 
+  // Auto-load processes on connect (skip in WASM mode)
   useEffect(() => {
+    if (isWasmMode) {
+      // WASM mode - no process list needed
+      setProcesses([]);
+      setFilteredProcesses([]);
+      return;
+    }
     if (connected) {
       loadProcesses();
     } else {
@@ -459,7 +468,97 @@ export function ProcessManager({ onModulesUpdate }: ProcessManagerProps) {
       }
       setNameFilter("");
     }
-  }, [connected, loadProcesses]); // systemActionsを依存配列から削除
+  }, [connected, loadProcesses, isWasmMode]); // systemActionsを依存配列から削除
+
+  // WASM Mode - show simplified attached view
+  if (isWasmMode && connected) {
+    return (
+      <Paper
+        sx={{
+          p: isCompactHeight ? 1.5 : 2,
+          border: "1px solid",
+          borderColor: "divider",
+          backgroundColor: "background.paper",
+          borderTopLeftRadius: 0,
+        }}
+      >
+        <Stack spacing={isCompactHeight ? 1.5 : 2}>
+          <Box display="flex" justifyContent="space-between" alignItems="center">
+            <Typography
+              variant="subtitle1"
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 1,
+                fontSize: isCompactHeight ? "11px" : "12px",
+                fontWeight: 600,
+                color: "primary.main",
+              }}
+            >
+              <ProcessIcon sx={{ fontSize: isCompactHeight ? "14px" : "16px" }} />
+              WebAssembly Mode
+            </Typography>
+          </Box>
+
+          <Paper
+            sx={{
+              p: isCompactHeight ? 1 : 1.5,
+              backgroundColor: "success.dark",
+              borderRadius: 1,
+              border: "1px solid",
+              borderColor: "success.main",
+            }}
+          >
+            <Typography
+              variant="body2"
+              sx={{
+                fontSize: isCompactHeight ? "10px" : "11px",
+                fontWeight: 600,
+                mb: isCompactHeight ? 0.5 : 1,
+                color: "success.contrastText",
+              }}
+            >
+              ✓ Connected to WebAssembly Runtime
+            </Typography>
+            <Stack spacing={isCompactHeight ? 0.25 : 0.5}>
+              <Typography
+                variant="body2"
+                sx={{ fontSize: isCompactHeight ? "9px" : "10px", color: "success.contrastText" }}
+              >
+                Target: Browser WebAssembly
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontSize: isCompactHeight ? "9px" : "10px", color: "success.contrastText" }}
+              >
+                Connection: WebSocket Bridge
+              </Typography>
+              {system.attachedModules && system.attachedModules.length > 0 && (
+                <Typography
+                  variant="body2"
+                  sx={{ fontSize: isCompactHeight ? "9px" : "10px", color: "success.contrastText" }}
+                >
+                  Modules: {system.attachedModules.length}
+                </Typography>
+              )}
+            </Stack>
+          </Paper>
+
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            align="center"
+            sx={{
+              fontSize: isCompactHeight ? "9px" : "10px",
+              fontStyle: "italic",
+            }}
+          >
+            Memory read/write via Chrome Extension
+          </Typography>
+        </Stack>
+      </Paper>
+    );
+  }
 
   return (
     <Paper

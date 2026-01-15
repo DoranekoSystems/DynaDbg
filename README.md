@@ -25,10 +25,13 @@ Next-Generation Remote Analysis Suite for Reverse Engineering.
 
 ## Remote
 
+- Windows(wip) - *Currently, debugger not supported*
 - macOS(arm64)
 - Linux(x86_64)
 - iOS(arm64)
 - Android(arm64)
+
+- WebAssembly(Browser) - *debugger not supported*
 
 # Usage
 
@@ -36,8 +39,8 @@ Please refer to the [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/Using
 
 # Building
 
-Fork this repository and run the **Build DynaDbg** workflow from the Actions tab to build the application.  
-See [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/GitHub-Actions) for detailed build options.
+- **GitHub Actions:** Fork this repository and run the **Build DynaDbg** workflow from the Actions tab. See [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/GitHub-Actions) for detailed build options.
+- **Manual Build:** See [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/Manual-Build) for step-by-step instructions.
 
 # Developing
 

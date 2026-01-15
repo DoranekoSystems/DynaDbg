@@ -43,6 +43,7 @@ use warp::{http::Response, http::StatusCode, Filter, Rejection, Reply};
 use crate::native_bridge::{self, ExceptionType};
 use crate::request;
 use crate::util;
+use crate::wasm_bridge;
 
 // Unified API response structures
 #[derive(Serialize)]
@@ -762,7 +763,10 @@ pub async fn server_info_handler() -> Result<impl warp::Reply, warp::Rejection> 
     let git_hash = env!("GIT_HASH");
     let target_os = env!("TARGET_OS");
 
-    let arch = if cfg!(target_arch = "x86_64") {
+    // In WASM mode, report wasm32 as the architecture
+    let arch = if wasm_bridge::is_wasm_mode() {
+        "wasm32"
+    } else if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else if cfg!(target_arch = "aarch64") {
         "aarch64"
@@ -791,20 +795,141 @@ pub async fn open_process_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
     open_process: request::OpenProcessRequest,
 ) -> Result<Box<dyn warp::Reply>, warp::Rejection> {
-    match pid_state.lock() {
-        Ok(mut pid) => {
-            *pid = Some(open_process.pid);
-            let response = SimpleResponse::success("Process attached successfully".to_string());
-            Ok(Box::new(warp::reply::json(&response)))
+    // Set the pid first with the lock, then release it before any async operations
+    let wasm_mode_active;
+    let attached_pid;
+    {
+        match pid_state.lock() {
+            Ok(mut pid) => {
+                *pid = Some(open_process.pid);
+                attached_pid = open_process.pid;
+                wasm_mode_active = wasm_bridge::is_wasm_mode();
+            }
+            Err(_) => {
+                let response = SimpleResponse::error("Failed to acquire process state lock".to_string());
+                return Ok(Box::new(warp::reply::with_status(
+                    warp::reply::json(&response),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                )));
+            }
         }
-        Err(_) => {
-            let response = SimpleResponse::error("Failed to acquire process state lock".to_string());
-            Ok(Box::new(warp::reply::with_status(
-                warp::reply::json(&response),
-                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-            )))
+    } // Lock is released here
+    
+    // In WASM mode, we don't need signature scan - just use WebSocket for memory access
+    if wasm_mode_active {
+        log::info!("WASM mode: Process attached (PID {} is virtual, using WebSocket bridge)", attached_pid);
+        
+        // No signature scan needed - memory access goes through WebSocket
+        // Initial snapshot can be taken later via explicit API call if needed
+        
+        let response = SimpleResponse::success(
+            "WASM process attached successfully via WebSocket bridge".to_string()
+        );
+        return Ok(Box::new(warp::reply::json(&response)));
+    }
+    
+    let response = SimpleResponse::success("Process attached successfully".to_string());
+    Ok(Box::new(warp::reply::json(&response)))
+}
+
+/// Scan process memory to find the WASM signature
+fn scan_for_wasm_signature(pid: i32, signature: &[u8]) -> Result<usize, String> {
+    if signature.len() != 64 {
+        return Err(format!("Invalid signature length: {} (expected 64)", signature.len()));
+    }
+    
+    // Get memory regions
+    let mut count: usize = 0;
+    let region_info_ptr = unsafe { 
+        native_bridge::enumerate_regions(pid, &mut count, false) 
+    };
+    
+    if region_info_ptr.is_null() || count == 0 {
+        return Err("Failed to enumerate memory regions".to_string());
+    }
+    
+    let regions = unsafe { std::slice::from_raw_parts(region_info_ptr, count) };
+    let mut found_address: Option<usize> = None;
+    
+    // Scan each readable region
+    for region in regions {
+        // Check if region is readable (protection & 1 = read)
+        if region.protection & 1 == 0 {
+            continue;
+        }
+        
+        let region_size = region.end - region.start;
+        
+        // Skip very large regions to avoid excessive memory usage
+        // WASM heap is typically a few MB to a few hundred MB
+        if region_size > 1024 * 1024 * 1024 {
+            continue;
+        }
+        
+        // Skip very small regions
+        if region_size < 64 {
+            continue;
+        }
+        
+        // Read region memory
+        let mut buffer = vec![0u8; region_size];
+        let result = unsafe {
+            native_bridge::read_memory_native(
+                pid,
+                region.start as libc::uintptr_t,
+                region_size,
+                buffer.as_mut_ptr(),
+            )
+        };
+        
+        if result < 0 {
+            continue;
+        }
+        
+        // Search for signature in buffer
+        if let Some(offset) = find_signature_in_buffer(&buffer, signature) {
+            found_address = Some(region.start + offset);
+            log::info!(
+                "Found WASM signature at 0x{:x} (region 0x{:x}-0x{:x}, offset 0x{:x})",
+                region.start + offset, region.start, region.end, offset
+            );
+            break;
         }
     }
+    
+    // Free region info
+    unsafe { native_bridge::free_region_info(region_info_ptr, count) };
+    
+    found_address.ok_or_else(|| "WASM signature not found in process memory".to_string())
+}
+
+/// Find signature bytes in a buffer
+fn find_signature_in_buffer(buffer: &[u8], signature: &[u8]) -> Option<usize> {
+    if buffer.len() < signature.len() {
+        return None;
+    }
+    
+    // Use memchr for efficient searching
+    let first_byte = signature[0];
+    let mut search_start = 0;
+    
+    while search_start + signature.len() <= buffer.len() {
+        // Find next occurrence of first byte
+        if let Some(pos) = memchr::memchr(first_byte, &buffer[search_start..]) {
+            let abs_pos = search_start + pos;
+            if abs_pos + signature.len() <= buffer.len() {
+                // Check if full signature matches
+                if &buffer[abs_pos..abs_pos + signature.len()] == signature {
+                    return Some(abs_pos);
+                }
+            }
+            search_start = abs_pos + 1;
+        } else {
+            break;
+        }
+    }
+    
+    None
 }
 
 pub async fn resolve_addr_handler(
@@ -848,6 +973,29 @@ pub async fn read_memory_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
     read_memory: request::ReadMemoryRequest,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // In WASM mode, all memory access goes through WebSocket bridge
+    if wasm_bridge::is_wasm_mode() {
+        // Use async read for all WASM memory (heap, code region, or snapshot)
+        match wasm_bridge::read_wasm_memory_async(read_memory.address, read_memory.size).await {
+            Ok(buffer) => {
+                let response = Response::builder()
+                    .header("Content-Type", "application/octet-stream")
+                    .body(hyper::Body::from(buffer))
+                    .unwrap();
+                return Ok(response);
+            }
+            Err(e) => {
+                log::error!("WASM read_memory failed: {}", e);
+                let empty_buffer = Vec::new();
+                let response = Response::builder()
+                    .header("Content-Type", "application/octet-stream")
+                    .body(hyper::Body::from(empty_buffer))
+                    .unwrap();
+                return Ok(response);
+            }
+        }
+    }
+
     match pid_state.lock() {
         Ok(pid) => {
             if let Some(pid) = *pid {
@@ -907,6 +1055,41 @@ pub async fn read_memory_multiple_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
     read_memory_requests: Vec<request::ReadMemoryRequest>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // In WASM mode, use async WebSocket bridge
+    if wasm_bridge::is_wasm_mode() {
+        let mut compressed_buffers: Vec<Vec<u8>> = Vec::new();
+        
+        for request in &read_memory_requests {
+            match wasm_bridge::read_wasm_memory_async(request.address, request.size).await {
+                Ok(buffer) => {
+                    let compressed_buffer = compress_prepend_size(&buffer);
+                    let mut result_buffer = Vec::with_capacity(8 + compressed_buffer.len());
+                    let compressed_buffer_size: u32 = compressed_buffer.len() as u32;
+                    result_buffer.extend_from_slice(&1u32.to_le_bytes());
+                    result_buffer.extend_from_slice(&compressed_buffer_size.to_le_bytes());
+                    result_buffer.extend_from_slice(&compressed_buffer);
+                    compressed_buffers.push(result_buffer);
+                }
+                Err(_) => {
+                    let mut result_buffer = Vec::with_capacity(4);
+                    result_buffer.extend_from_slice(&0u32.to_le_bytes());
+                    compressed_buffers.push(result_buffer);
+                }
+            }
+        }
+        
+        let mut concatenated_buffer = Vec::new();
+        for buffer in compressed_buffers {
+            concatenated_buffer.extend(buffer);
+        }
+        
+        let response = Response::builder()
+            .header("Content-Type", "application/octet-stream")
+            .body(hyper::Body::from(concatenated_buffer))
+            .unwrap();
+        return Ok(response);
+    }
+
     let pid = pid_state.lock().unwrap();
     if let Some(pid) = *pid {
         let compressed_buffers: Vec<Vec<u8>> = read_memory_requests
@@ -961,6 +1144,37 @@ pub async fn write_memory_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
     write_memory: request::WriteMemoryRequest,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // In WASM mode, use async WebSocket bridge
+    if wasm_bridge::is_wasm_mode() {
+        match wasm_bridge::write_wasm_memory_async(write_memory.address, &write_memory.buffer).await {
+            Ok(success) => {
+                if success {
+                    let response = Response::builder()
+                        .header("Content-Type", "application/json")
+                        .body(hyper::Body::from(r#"{"success":true,"message":"Memory successfully written"}"#))
+                        .unwrap();
+                    return Ok(response);
+                } else {
+                    let response = Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .header("Content-Type", "application/json")
+                        .body(hyper::Body::from(r#"{"success":false,"error":"WASM memory write failed"}"#))
+                        .unwrap();
+                    return Ok(response);
+                }
+            }
+            Err(e) => {
+                log::error!("WASM write_memory failed: {}", e);
+                let response = Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("Content-Type", "application/json")
+                    .body(hyper::Body::from(format!(r#"{{"success":false,"error":"{}"}}"#, e)))
+                    .unwrap();
+                return Ok(response);
+            }
+        }
+    }
+
     let pid = pid_state.lock().unwrap();
 
     if let Some(pid) = *pid {
@@ -1110,17 +1324,27 @@ pub async fn memory_scan_handler(
             }
         });
 
+        // Get tokio handle for WASM mode (needed for rayon threads)
+        let tokio_handle = if wasm_bridge::is_wasm_mode() {
+            tokio::runtime::Handle::try_current().ok()
+        } else {
+            None
+        };
+        let tokio_handle = Arc::new(tokio_handle);
+
         // Start scanning in background thread
         let scan_request_clone = scan_request.clone();
         let scan_folder_path_clone = scan_folder_path.clone();
         let stop_flag_clone = stop_flag.clone();
         std::thread::spawn(move || {
+            let tokio_handle_clone = Arc::clone(&tokio_handle);
             let thread_results: Vec<Vec<(usize, String)>> = scan_request_clone
                 .address_ranges
                 .par_iter()
                 .enumerate()
                 .flat_map(|(index, &(ref start_address, ref end_address))| {
                     let found_count = Arc::clone(&found_count);
+                    let tokio_handle = Arc::clone(&tokio_handle_clone);
                     let size = end_address - start_address;
                     let chunk_size = 1024 * 1024 * 16; // 16MB
                     let num_chunks = (size + chunk_size - 1) / chunk_size;
@@ -1148,11 +1372,12 @@ pub async fn memory_scan_handler(
                             let mut local_positions = vec![];
                             let mut local_values = vec![];
 
-                            let nread = match native_bridge::read_process_memory(
+                            let nread = match native_bridge::read_process_memory_with_handle(
                                 pid,
                                 chunk_start as *mut libc::c_void,
                                 chunk_size_actual,
                                 &mut buffer,
+                                tokio_handle.as_ref().as_ref(),
                             ) {
                                 Ok(nread) => nread,
                                 Err(_) => -1,
@@ -1776,6 +2001,14 @@ async fn perform_memory_filter_async(
             }
         });
 
+        // Get tokio handle for WASM mode (needed for rayon threads)
+        let tokio_handle = if wasm_bridge::is_wasm_mode() {
+            tokio::runtime::Handle::try_current().ok()
+        } else {
+            None
+        };
+        let tokio_handle = Arc::new(tokio_handle);
+
         // unknown search
         if scan_option.find_type == "unknown" {
             if do_suspend {
@@ -1812,7 +2045,9 @@ async fn perform_memory_filter_async(
             }
 
             if !*is_error_occurred.lock().unwrap() {
+                let tokio_handle_clone = Arc::clone(&tokio_handle);
                 paths.par_iter().enumerate().for_each(|(_index, file_path)| {
+                    let tokio_handle = Arc::clone(&tokio_handle_clone);
                     let mut error_occurred = is_error_occurred.lock().unwrap();
                     let mut error_msg = error_message.lock().unwrap();
                     if *error_occurred {
@@ -1884,11 +2119,12 @@ async fn perform_memory_filter_async(
 
                                     let mut buffer: Vec<u8> =
                                         vec![0; (decompressed_data.len()) as usize];
-                                    let _nread = match native_bridge::read_process_memory(
+                                    let _nread = match native_bridge::read_process_memory_with_handle(
                                         pid,
                                         address as *mut libc::c_void,
                                         decompressed_data.len(),
                                         &mut buffer,
+                                        tokio_handle.as_ref().as_ref(),
                                     ) {
                                         Ok(nread) => nread,
                                         Err(_err) => -1,
@@ -2077,11 +2313,12 @@ async fn perform_memory_filter_async(
                                 offset += size;
 
                                 let mut new_val_vec: Vec<u8> = vec![0; size];
-                                let nread = match native_bridge::read_process_memory(
+                                let nread = match native_bridge::read_process_memory_with_handle(
                                     pid,
                                     address as *mut libc::c_void,
                                     size,
                                     &mut new_val_vec,
+                                    tokio_handle.as_ref().as_ref(),
                                 ) {
                                     Ok(nread) => nread,
                                     Err(_) => {
@@ -2336,10 +2573,12 @@ async fn perform_memory_filter_async(
                     is_suspend_success = native_bridge::suspend_process(pid);
                 }
             }
+            let tokio_handle_clone = Arc::clone(&tokio_handle);
             let results: Result<Vec<_>, _> = positions
                 .par_iter()
                 .enumerate()
                 .map(|(_index, (address, value))| {
+                    let tokio_handle = Arc::clone(&tokio_handle_clone);
                     // Calculate the correct size based on data type instead of pattern length
                     let size = match filter_request.data_type.as_str() {
                         "int8" | "uint8" => 1,
@@ -2351,11 +2590,12 @@ async fn perform_memory_filter_async(
                     };
                     
                     let mut buffer: Vec<u8> = vec![0; size];
-                    let _nread = match native_bridge::read_process_memory(
+                    let _nread = match native_bridge::read_process_memory_with_handle(
                         pid,
                         *address as *mut libc::c_void,
                         size,
                         &mut buffer,
+                        tokio_handle.as_ref().as_ref(),
                     ) {
                         Ok(nread) => nread,
                         Err(_err) => -1,
@@ -2786,6 +3026,22 @@ pub async fn enumerate_regions_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
     include_file_path: bool,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // Check if WASM mode is enabled
+    if wasm_bridge::is_wasm_mode() {
+        // In WASM mode, return regions using Cetus-style enumeration
+        // This returns 2 regions if an initial snapshot exists:
+        // 1. Live linear memory (heap)
+        // 2. Initial snapshot (frozen at initialization)
+        let regions = wasm_bridge::get_wasm_regions_json();
+        let result = json!({ "regions": regions });
+        let result_string = result.to_string();
+        let response = Response::builder()
+            .header("Content-Type", "application/json")
+            .body(hyper::Body::from(result_string))
+            .unwrap();
+        return Ok(response);
+    }
+
     let pid = pid_state.lock().unwrap();
 
     if let Some(pid) = *pid {
@@ -2884,6 +3140,13 @@ pub async fn enumerate_process_handler() -> Result<impl Reply, Rejection> {
 pub async fn enumerate_modules_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // Check if WASM mode is enabled - return WASM module info (Cetus-style)
+    if wasm_bridge::is_wasm_mode() {
+        let modules = wasm_bridge::get_wasm_modules_json();
+        let response = ApiResponse::success(json!({ "modules": modules }));
+        return Ok(warp::reply::json(&response));
+    }
+
     match pid_state.lock() {
         Ok(pid) => {
             if let Some(pid) = *pid {
@@ -2912,6 +3175,12 @@ pub async fn enumerate_modules_handler(
 pub async fn enumerate_threads_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // In WASM mode, return empty threads list (WASM has no native threads)
+    if wasm_bridge::is_wasm_mode() {
+        let response = ApiResponse::success(json!({ "threads": Vec::<serde_json::Value>::new() }));
+        return Ok(warp::reply::json(&response));
+    }
+
     match pid_state.lock() {
         Ok(pid) => {
             if let Some(pid) = *pid {
@@ -2941,6 +3210,13 @@ pub async fn enumerate_symbols_handler(
     module_base: usize,
     pid_state: Arc<Mutex<Option<i32>>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // In WASM mode, return symbols from Cetus-style instrumentation
+    if wasm_bridge::is_wasm_mode() {
+        let symbols = wasm_bridge::get_wasm_symbols_json();
+        let response = ApiResponse::success(json!({ "symbols": symbols }));
+        return Ok(warp::reply::json(&response));
+    }
+
     let pid = pid_state.lock().unwrap();
     if let Some(pid) = *pid {
         match native_bridge::enum_symbols(pid, module_base) {
@@ -4865,4 +5141,64 @@ pub async fn get_app_running_status_handler(
         let response = ApiResponse::<Value>::error("App running status not supported on this platform".to_string());
         Ok(warp::reply::json(&response))
     }
+}
+
+// ============================================================================
+// WASM Binary Dump Handlers
+// ============================================================================
+
+/// Dump entire WASM binary for Ghidra analysis
+/// Returns raw binary data (application/octet-stream)
+pub async fn wasm_dump_handler() -> Result<impl warp::Reply, warp::Rejection> {
+    if !wasm_bridge::is_wasm_mode() {
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"success":false,"error":"Not in WASM mode"}"#))
+            .unwrap());
+    }
+    
+    match wasm_bridge::dump_wasm_binary().await {
+        Ok(binary) => {
+            info!("WASM dump: returning {} bytes", binary.len());
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Disposition", "attachment; filename=\"module.wasm\"")
+                .header("Content-Length", binary.len().to_string())
+                .body(Body::from(binary))
+                .unwrap())
+        }
+        Err(e) => {
+            error!("WASM dump failed: {}", e);
+            Ok(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(r#"{{"success":false,"error":"{}"}}"#, e)))
+                .unwrap())
+        }
+    }
+}
+
+/// Get WASM module info
+pub async fn wasm_info_handler() -> Result<impl warp::Reply, warp::Rejection> {
+    if !wasm_bridge::is_wasm_mode() {
+        let response = json!({
+            "success": false,
+            "error": "Not in WASM mode"
+        });
+        return Ok(warp::reply::json(&response));
+    }
+    
+    let code_size = wasm_bridge::get_wasm_code_size();
+    let module_info = wasm_bridge::get_wasm_module_info();
+    
+    let response = json!({
+        "success": true,
+        "module_info": module_info,
+        "code_size": code_size,
+        "has_binary": code_size > 0
+    });
+    
+    Ok(warp::reply::json(&response))
 }

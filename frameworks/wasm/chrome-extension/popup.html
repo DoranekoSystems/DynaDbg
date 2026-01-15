@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>DynaDbg WASM Bridge</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 320px;
+      min-height: 200px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 16px;
+    }
+
+    h1 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: #00d4ff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    h1::before {
+      content: "⚡";
+    }
+
+    .section {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid #1a1a2e;
+    }
+
+    .status-row:last-child {
+      border-bottom: none;
+    }
+
+    .status-label {
+      font-size: 13px;
+      color: #aaa;
+    }
+
+    .status-value {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .status-connected {
+      color: #4ade80;
+    }
+
+    .status-disconnected {
+      color: #f87171;
+    }
+
+    .status-number {
+      color: #fbbf24;
+      font-family: 'Monaco', 'Consolas', monospace;
+    }
+
+    .input-group {
+      margin-bottom: 12px;
+    }
+
+    .input-group label {
+      display: block;
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 4px;
+    }
+
+    .input-group input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #333;
+      border-radius: 4px;
+      background: #0f0f1a;
+      color: #eee;
+      font-size: 13px;
+      font-family: 'Monaco', 'Consolas', monospace;
+    }
+
+    .input-group input:focus {
+      outline: none;
+      border-color: #00d4ff;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    button {
+      flex: 1;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-connect {
+      background: #00d4ff;
+      color: #000;
+    }
+
+    .btn-connect:hover {
+      background: #00b8e6;
+    }
+
+    .btn-connect:disabled {
+      background: #333;
+      color: #666;
+      cursor: not-allowed;
+    }
+
+    .btn-disconnect {
+      background: #333;
+      color: #eee;
+    }
+
+    .btn-disconnect:hover {
+      background: #444;
+    }
+
+    .indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+
+    .indicator-on {
+      background: #4ade80;
+      box-shadow: 0 0 6px #4ade80;
+    }
+
+    .indicator-off {
+      background: #666;
+    }
+
+    .footer {
+      text-align: center;
+      font-size: 11px;
+      color: #555;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>DynaDbg WASM Bridge</h1>
+
+  <div class="section">
+    <div class="section-title">Connection</div>
+    <div class="input-group">
+      <label for="serverUrl">Debug Server URL</label>
+      <input type="text" id="serverUrl" value="ws://localhost:8765" />
+    </div>
+    <div class="btn-row">
+      <button id="btnConnect" class="btn-connect">Connect</button>
+      <button id="btnDisconnect" class="btn-disconnect">Disconnect</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Status</div>
+    <div class="status-row">
+      <span class="status-label">Server</span>
+      <span id="statusConnection" class="status-value status-disconnected">
+        <span class="indicator indicator-off"></span>Disconnected
+      </span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">WASM Binary</span>
+      <span id="statusBinary" class="status-value status-disconnected">Not Captured</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Code Size</span>
+      <span id="statusCodeSize" class="status-value status-number">0 bytes</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Heap Size</span>
+      <span id="statusHeapSize" class="status-value status-number">0 bytes</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Symbols</span>
+      <span id="statusSymbols" class="status-value status-number">0</span>
+    </div>
+  </div>
+
+  <div class="footer">
+    Refresh page to capture WASM on load
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

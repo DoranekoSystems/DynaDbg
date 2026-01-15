@@ -73,7 +73,9 @@ export const StatusBarComponent: React.FC<StatusBarComponentProps> = ({
       const processName =
         attachedAppInfo?.name || attachedProcess.processname || "Unknown";
       const pid = attachedProcess.pid;
-      return { processName, pid };
+      // Hide PID for WASM mode (pid === 0)
+      const isWasmMode = pid === 0;
+      return { processName, pid, isWasmMode };
     }
     return null;
   };
@@ -129,7 +131,9 @@ export const StatusBarComponent: React.FC<StatusBarComponentProps> = ({
               variant="body2"
               sx={{ fontSize: "11px", color: "#FF9800" }}
             >
-              Process: {processInfo.processName} (PID: {processInfo.pid})
+              {processInfo.isWasmMode
+                ? `Process: ${processInfo.processName}`
+                : `Process: ${processInfo.processName} (PID: ${processInfo.pid})`}
             </Typography>
           </Box>
         )}

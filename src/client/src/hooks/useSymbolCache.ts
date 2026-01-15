@@ -208,12 +208,22 @@ export function useSymbolCache() {
             const address = parseInt(symbol.address, 16);
             if (isNaN(address)) return null;
 
+            // Use symbol's module_base if available (important for WASM mode),
+            // otherwise fall back to the module's base address
+            let symbolModuleBase = module.base;
+            if (symbol.module_base) {
+              const parsedModuleBase = parseInt(symbol.module_base, 16);
+              if (!isNaN(parsedModuleBase)) {
+                symbolModuleBase = parsedModuleBase;
+              }
+            }
+
             return {
               address,
               endAddress: address + (symbol.size || 1),
               name: symbol.name,
               moduleName,
-              moduleBase: module.base,
+              moduleBase: symbolModuleBase,
             };
           })
           .filter((s): s is CachedSymbol => s !== null);

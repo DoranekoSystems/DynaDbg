@@ -779,6 +779,11 @@ export const useScannerState = () => {
 
                 if (resultsResponse.success && resultsResponse.data) {
                   const resultsData = resultsResponse.data;
+                  console.log(`Scan results data:`, {
+                    found: resultsData.found,
+                    matchedAddressesLength: resultsData.matched_addresses?.length,
+                    matchedAddresses: resultsData.matched_addresses?.slice(0, 5), // First 5 for debug
+                  });
 
                   // Get current state for pattern length
                   setScannerState((prev) => {
@@ -797,6 +802,11 @@ export const useScannerState = () => {
                           };
                         }
                       );
+                    
+                    console.log(`Processed scan results:`, {
+                      resultsLength: results.length,
+                      firstFive: results.slice(0, 5),
+                    });
 
                     // Update global state
                     uiActions.setScanResults(results);

@@ -13,6 +13,7 @@ mod native_bridge;
 mod request;
 mod serve;
 mod util;
+mod wasm_bridge;
 
 #[ctor]
 fn main() {

@@ -253,6 +253,7 @@ const MinimapContainer = styled(Box)(() => ({
 // Note: bl, blr, call are function calls that return to the next instruction,
 // so they should NOT split blocks
 const JUMP_OPCODES = new Set([
+  // ARM64
   "b",
   "br",
   "ret",
@@ -275,6 +276,7 @@ const JUMP_OPCODES = new Set([
   "cbnz",
   "tbz",
   "tbnz",
+  // x86
   "jmp",
   "je",
   "jne",
@@ -298,9 +300,16 @@ const JUMP_OPCODES = new Set([
   "jle",
   "ret",
   "retn",
+  // WASM control flow
+  "br",
+  "br_if",
+  "br_table",
+  "return",
+  "end",
 ]);
 
 const CONDITIONAL_JUMP_OPCODES = new Set([
+  // ARM64
   "b.eq",
   "b.ne",
   "b.cs",
@@ -319,6 +328,7 @@ const CONDITIONAL_JUMP_OPCODES = new Set([
   "cbnz",
   "tbz",
   "tbnz",
+  // x86
   "je",
   "jne",
   "jz",
@@ -339,9 +349,12 @@ const CONDITIONAL_JUMP_OPCODES = new Set([
   "jge",
   "jl",
   "jle",
+  // WASM conditional
+  "br_if",
+  "if",
 ]);
 
-const RETURN_OPCODES = new Set(["ret", "retn"]);
+const RETURN_OPCODES = new Set(["ret", "retn", "return"]);
 
 const isJumpInstruction = (opcode: string): boolean => {
   return JUMP_OPCODES.has(opcode.toLowerCase());

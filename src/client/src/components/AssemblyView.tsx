@@ -104,6 +104,7 @@ interface Instruction {
   isFunction?: boolean;
   isFunctionStart?: boolean;
   isFunctionEnd?: boolean;
+  indent?: number; // Indentation level for WASM block structure
 }
 
 // Branch arrow information for visualization
@@ -869,6 +870,7 @@ interface DisasmLineComponentProps {
   ) => void;
   currentBreakAddress?: string | null;
   isInBreakState?: boolean;
+  isWasmMode?: boolean; // WASM mode - no debugger features available (BP/HW disabled)
   softwareBreakpointOriginalBytes?: string; // Original bytes for software breakpoint (if any)
   getModuleDetail?: (address: string) => React.ReactNode; // Function to get module detail for address
   getModuleDetailText?: (address: string) => string; // Function to get module detail text for tooltip
@@ -893,6 +895,7 @@ const DisasmLineComponent: React.FC<DisasmLineComponentProps> = React.memo(
     isFocused = false,
     onFocus,
     isInBreakState = false,
+    isWasmMode = false,
     softwareBreakpointOriginalBytes,
     getModuleDetail,
     getModuleDetailText,
@@ -1192,9 +1195,19 @@ const DisasmLineComponent: React.FC<DisasmLineComponentProps> = React.memo(
             maxWidth: columnWidths.breakpoint
               ? `${columnWidths.breakpoint}px`
               : undefined,
+            // Disable visual feedback in WASM mode
+            ...(isWasmMode && {
+              cursor: "not-allowed",
+              opacity: 0.5,
+              "&:hover": {
+                backgroundColor: "transparent",
+              },
+            }),
           }}
           onClick={(e) => {
             e.stopPropagation();
+            // Skip breakpoint toggle in WASM mode (no debugger support)
+            if (isWasmMode) return;
             onBreakpointClick(instruction.address, e);
           }}
         >
@@ -1307,6 +1320,16 @@ const DisasmLineComponent: React.FC<DisasmLineComponentProps> = React.memo(
             }
           }}
         >
+          {/* WASM block indentation - add padding based on indent level */}
+          {instruction.indent != null && instruction.indent > 0 && (
+            <span
+              style={{
+                display: "inline-block",
+                width: `${instruction.indent * 16}px`,
+                minWidth: `${instruction.indent * 16}px`,
+              }}
+            />
+          )}
           <OpcodeText
             sx={{
               color:
@@ -1327,7 +1350,7 @@ const DisasmLineComponent: React.FC<DisasmLineComponentProps> = React.memo(
           >
             {instruction.opcode}
           </OpcodeText>
-          <OperandsText>{formattedOperands}</OperandsText>
+          {formattedOperands && <OperandsText> {formattedOperands}</OperandsText>}
           {(() => {
             // getFormattedCommentがあればそれを使い、なければinstruction.commentを使う
             const displayComment = getFormattedComment
@@ -1585,6 +1608,9 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
   onHighlightComplete,
 }) => {
   const { addLog } = useGlobalDebugLogger();
+  
+  // Check if WASM mode (no debugger features available)
+  const isWasmMode = serverInfo?.arch === "wasm32" || serverInfo?.mode === "wasm";
 
   // グローバルストアからassemblyAddressを取得
   const assemblyAddress = useUIStore(
@@ -3380,6 +3406,9 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
       }
 
       const instructions: Instruction[] = [];
+      
+      // Track block depth for WASM structured control flow
+      let blockDepth = 0;
 
       lines.forEach((line, index) => {
         try {
@@ -3399,7 +3428,9 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
                 breakpoint: false,
                 jumpTarget: true,
                 isFunction: true,
+                indent: 0,
               });
+              blockDepth = 0; // Reset block depth for new function
               return;
             }
           }
@@ -3432,7 +3463,28 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
                 }
               }
 
-              const result = {
+              // Track WASM block depth for structured indentation
+              // 'end' instruction decrements depth BEFORE the instruction
+              const isWasmEnd = opcode === "end";
+              const isWasmBlockStart = ["block", "loop", "if"].includes(opcode);
+              const isWasmElse = opcode === "else";
+              
+              // For 'end' and 'else', decrement before assigning indent
+              if (isWasmEnd && blockDepth > 0) {
+                blockDepth--;
+              }
+              if (isWasmElse && blockDepth > 0) {
+                blockDepth--;
+              }
+              
+              const currentIndent = blockDepth;
+              
+              // After block/loop/if/else, increment depth for subsequent instructions
+              if (isWasmBlockStart || isWasmElse) {
+                blockDepth++;
+              }
+
+              const result: Instruction = {
                 address,
                 bytes,
                 opcode,
@@ -3448,6 +3500,7 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
                 jumpTarget: false,
                 isFunctionStart,
                 isFunctionEnd,
+                indent: currentIndent,
               };
               instructions.push(result);
               return;
@@ -5326,7 +5379,9 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
       if (clickedIndex !== -1) {
         for (let i = clickedIndex; i < instructionBuffer.length; i++) {
           const opcode = instructionBuffer[i].opcode.toLowerCase();
-          if (opcode === "ret" || opcode === "retn") {
+          // ret/retn for native, 'end' at indent 0 for WASM
+          if (opcode === "ret" || opcode === "retn" || 
+              (opcode === "end" && instructionBuffer[i].indent === 0)) {
             functionEndIndex = i;
             break;
           }
@@ -7090,7 +7145,13 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
                           width: `${columnResize.getColumnWidth("breakpoint")}px`,
                           minWidth: `${columnResize.getColumnWidth("breakpoint")}px`,
                           maxWidth: `${columnResize.getColumnWidth("breakpoint")}px`,
+                          // Dim header in WASM mode
+                          ...(isWasmMode && {
+                            opacity: 0.5,
+                            cursor: "not-allowed",
+                          }),
                         }}
+                        title={isWasmMode ? "Breakpoints not available in WASM mode" : "Breakpoint"}
                       >
                         BP
                         <ColumnResizer
@@ -7254,6 +7315,7 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
                           isFocused={focusedLineAddress === instruction.address}
                           onFocus={setFocusedLineAddress}
                           isInBreakState={isInBreakState}
+                          isWasmMode={isWasmMode}
                           softwareBreakpointOriginalBytes={softwareBreakpoints.get(
                             instruction.address
                           )}
@@ -7380,29 +7442,34 @@ export const AssemblyView: React.FC<AssemblyViewProps> = ({
           </MenuItem>,
           <Divider key="func-divider" sx={{ borderColor: "#3c3c3c" }} />,
         ]}
-        <MenuItem
-          onClick={() => {
-            if (contextMenu) {
-              toggleBreakpoint(contextMenu.address);
-            }
-            handleContextMenuClose();
-          }}
-        >
-          <ListItemIcon>
-            <BreakpointIcon fontSize="small" sx={{ color: "#ff4444" }} />
-          </ListItemIcon>
-          <ListItemText>
-            {contextMenu && breakpoints.has(contextMenu.address)
-              ? "Remove Breakpoint"
-              : "Set Breakpoint"}
-          </ListItemText>
-        </MenuItem>
-        <MenuItem onClick={handleReplaceWithNop}>
-          <ListItemIcon>
-            <NopIcon fontSize="small" sx={{ color: "#ffa726" }} />
-          </ListItemIcon>
-          <ListItemText>Replace with NOP</ListItemText>
-        </MenuItem>
+        {/* Breakpoint and NOP - hide in WASM mode (not supported) */}
+        {!isWasmMode && (
+          <MenuItem
+            onClick={() => {
+              if (contextMenu) {
+                toggleBreakpoint(contextMenu.address);
+              }
+              handleContextMenuClose();
+            }}
+          >
+            <ListItemIcon>
+              <BreakpointIcon fontSize="small" sx={{ color: "#ff4444" }} />
+            </ListItemIcon>
+            <ListItemText>
+              {contextMenu && breakpoints.has(contextMenu.address)
+                ? "Remove Breakpoint"
+                : "Set Breakpoint"}
+            </ListItemText>
+          </MenuItem>
+        )}
+        {!isWasmMode && (
+          <MenuItem onClick={handleReplaceWithNop}>
+            <ListItemIcon>
+              <NopIcon fontSize="small" sx={{ color: "#ffa726" }} />
+            </ListItemIcon>
+            <ListItemText>Replace with NOP</ListItemText>
+          </MenuItem>
+        )}
         <Divider sx={{ borderColor: "#3c3c3c" }} />
         {/* Code Tracing menu item - enabled for iOS */}
         {serverInfo?.target_os === "ios" && (

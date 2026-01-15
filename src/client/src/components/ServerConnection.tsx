@@ -20,7 +20,7 @@ import {
   Warning as WarningIcon,
 } from "@mui/icons-material";
 
-import { getApiClient, ServerInfo } from "../lib/api";
+import { getApiClient, ServerInfo, ProcessInfo } from "../lib/api";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useAppState } from "../hooks/useAppState";
 
@@ -183,9 +183,44 @@ export function ServerConnection({
       systemActions.updateField("activeBreakpoints", []);
       systemActions.updateField("softwareBreakpoints", []);
       systemActions.updateField("watchpoints", []);
-      systemActions.updateField("attachedProcess", null);
-      systemActions.updateField("attachedAppInfo", null);
-      systemActions.updateField("attachedModules", []);
+      
+      // Check if WASM mode - auto-attach with virtual process
+      if (serverInfo.mode === "wasm") {
+        console.log("[ServerConnection] WASM mode detected - auto-attaching");
+        
+        // Create virtual process info for WASM
+        const wasmProcess: ProcessInfo = {
+          pid: 0, // Virtual PID for WASM
+          processname: "WebAssembly"
+        };
+        
+        // Auto-attach to WASM (server already handles this)
+        try {
+          await client.attachProcess(0);
+        } catch (e) {
+          console.warn("[ServerConnection] WASM attach call:", e);
+          // Ignore - WASM mode doesn't need real attach
+        }
+        
+        // Set attached process state
+        systemActions.updateField("attachedProcess", wasmProcess);
+        
+        // Fetch modules (will return WASM module info)
+        try {
+          const modulesResponse = await client.enumerateModules();
+          if (modulesResponse.success && modulesResponse.data?.modules) {
+            systemActions.updateField("attachedModules", modulesResponse.data.modules);
+          }
+        } catch (e) {
+          console.warn("[ServerConnection] Failed to get WASM modules:", e);
+        }
+        
+        console.log("[ServerConnection] WASM auto-attach completed");
+      } else {
+        systemActions.updateField("attachedProcess", null);
+        systemActions.updateField("attachedAppInfo", null);
+        systemActions.updateField("attachedModules", []);
+      }
 
       console.log("Debug state initialized on server connection");
 
