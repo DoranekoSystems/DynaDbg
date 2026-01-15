@@ -30,7 +30,7 @@ const faqItems: FAQItem[] = [
   {
     question: "Is this project open source?",
     answer:
-      "Yes! This project has been open source since January 7, 2026 under the GPL v3 license. Contributions are welcome — feel free to submit pull requests!",
+      "Yes! This project has been open source since January 7, 2026 under the GPL v3 license. ",
     icon: <CodeIcon />,
     tags: ["Open Source", "License"],
   },

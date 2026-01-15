@@ -433,17 +433,22 @@ fn main() {
             println!("cargo:rustc-link-lib=dbghelp");
             
             // Track source file changes for incremental builds
-            println!("cargo:rerun-if-changed=src/cpp/src/windows/native_api.cpp");
-            println!("cargo:rerun-if-changed=src/cpp/src/windows/native_api.h");
-            println!("cargo:rerun-if-changed=src/cpp/src/windows/file_api.cpp");
-            println!("cargo:rerun-if-changed=src/cpp/src/windows/file_api.h");
-            println!("cargo:rerun-if-changed=src/cpp/src/windows/debugger.cpp");
-            println!("cargo:rerun-if-changed=src/cpp/src/windows/debugger.h");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/core/native_api.cpp");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/core/native_api.h");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/core/memory_io.cpp");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/core/memory_io.h");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/core/file_api.cpp");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/core/file_api.h");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/core/callback_stubs.cpp");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/debugger/debugger.cpp");
+            println!("cargo:rerun-if-changed=src/cpp/src/windows/debugger/debugger.h");
             println!("cargo:rerun-if-changed=src/cpp/src/common/exception_info.h");
             
-            build.file("src/cpp/src/windows/native_api.cpp");
-            build.file("src/cpp/src/windows/file_api.cpp");
-            build.file("src/cpp/src/windows/debugger.cpp");
+            build.file("src/cpp/src/windows/core/native_api.cpp");
+            build.file("src/cpp/src/windows/core/memory_io.cpp");
+            build.file("src/cpp/src/windows/core/file_api.cpp");
+            build.file("src/cpp/src/windows/core/callback_stubs.cpp");
+            build.file("src/cpp/src/windows/debugger/debugger.cpp");
         }
         "macos" => {
             println!("cargo:rustc-link-arg=-lc++");
