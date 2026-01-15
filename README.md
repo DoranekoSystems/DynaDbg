@@ -25,13 +25,14 @@ Next-Generation Remote Analysis Suite for Reverse Engineering.
 
 ## Remote
 
-- Windows(wip) - *Currently, debugger not supported*
-- macOS(arm64)
-- Linux(x86_64)
-- iOS(arm64)
-- Android(arm64)
-
-- WebAssembly(Browser) - *debugger not supported*
+| OS | Arch | Scanner | Debugger |
+|---|---|:---:|:---:|
+| Windows | x86_64 | ○ | × |
+| macOS | arm64 | ○ | △ |
+| Linux | x86_64 | ○ | △ |
+| iOS | arm64 | ○ | △ |
+| Android | arm64 | ○ | △ |
+| WebAssembly | Browser | ○ | × |
 
 # Usage
 
@@ -77,3 +78,4 @@ For a full list of dependencies, see [CREDITS.md](CREDITS.md).
 ### Special Thanks
 
 - [MachOKit](https://github.com/p-x9/MachOKit) by [p-x9](https://github.com/p-x9) - MIT License
+- [Cetus](https://github.com/Qwokka/Cetus) by [Qwokka](https://github.com/Qwokka) - Apache License 2.0
