@@ -38,6 +38,7 @@ rand = "0.8"
 base64 = "0.22"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+yara-x = "0.12"
 
 [features]
 default = []

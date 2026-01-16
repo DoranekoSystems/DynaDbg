@@ -19,6 +19,7 @@ This project uses the following open source libraries:
 * [Capstone](https://github.com/capstone-rust/capstone-rs) - MIT License
 * [Rayon](https://github.com/rayon-rs/rayon) - Apache-2.0 / MIT License
 * [Clap](https://github.com/clap-rs/clap) - Apache-2.0 / MIT License
+* [yara-x](https://github.com/VirusTotal/yara-x) - BSD 3-Clause License
 
 ## Special Thanks
 * [MachOKit](https://github.com/p-x9/MachOKit) by [p-x9](https://github.com/p-x9) - MIT License

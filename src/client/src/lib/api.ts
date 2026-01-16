@@ -792,6 +792,33 @@ class ApiClient {
     });
   }
 
+  // YARA memory scan
+  async yaraScan(scanRequest: {
+    rule: string;
+    address_ranges: [number, number][];
+    scan_id: string;
+    align: number;
+    do_suspend: boolean;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    scan_id: string;
+    matches: {
+      rule_name: string;
+      address: number;
+      length: number;
+      pattern_id: string;
+      matched_data: string;
+    }[];
+    total_matches: number;
+    scanned_bytes: number;
+  }> {
+    return this.request("/api/memory/yara", {
+      method: "POST",
+      body: JSON.stringify(scanRequest),
+    });
+  }
+
   async memoryFilter(filterRequest: FilterRequest): Promise<FilterResponse> {
     return this.request<FilterResponse>("/api/memory/filter", {
       method: "POST",

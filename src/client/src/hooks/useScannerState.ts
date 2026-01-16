@@ -49,6 +49,8 @@ const defaultScanSettings: ScanSettings = {
   executable: false,
   readable: true,
   doSuspend: false,
+  searchMode: "normal",
+  yaraRule: "",
 };
 
 // Generate unique scan ID
@@ -412,6 +414,8 @@ export const useScannerState = () => {
         valueType: ui.scannerState.scanSettings.valueType as ScanValueType,
         scanType: ui.scannerState.scanSettings.scanType as ScanType,
         scanMode: ui.scannerState.scanSettings.scanMode as "manual" | "regions",
+        searchMode: (ui.scannerState.scanSettings as any).searchMode || "normal",
+        yaraRule: (ui.scannerState.scanSettings as any).yaraRule || "",
       },
     }));
   }, [ui.scannerState]);
@@ -787,19 +791,59 @@ export const useScannerState = () => {
 
                   // Get current state for pattern length
                   setScannerState((prev) => {
+                    const isYaraMode = (prev.scanSettings as any).searchMode === "yara";
+                    
                     const results: ScanResult[] =
                       resultsData.matched_addresses.map(
                         (item: { address: number; value: string }) => {
-                          return {
-                            address: `0x${item.address.toString(16)}`,
-                            value: convertHexBytesToValue(
-                              item.value,
-                              prev.scanSettings.valueType,
-                              prev.searchPatternLength
-                            ),
-                            type: prev.scanSettings.valueType,
-                            description: "Scan result",
-                          };
+                          if (isYaraMode) {
+                            // YARA results: value format is "rule::pattern|hex_data"
+                            let displayValue = item.value;
+                            let description = "YARA match";
+                            
+                            try {
+                              // Parse the new format: rule::pattern|hex_data
+                              const pipeIdx = item.value.indexOf('|');
+                              if (pipeIdx > 0) {
+                                // Extract rule info (before |)
+                                description = item.value.slice(0, pipeIdx);
+                                
+                                // Extract matched data hex (after |)
+                                const hexData = item.value.slice(pipeIdx + 1);
+                                const bytes = hexData.match(/.{1,2}/g) || [];
+                                const chars = bytes.map(b => parseInt(b, 16));
+                                
+                                // Check if printable ASCII
+                                const isPrintable = chars.every(c => c >= 32 && c < 127);
+                                if (isPrintable && chars.length > 0) {
+                                  displayValue = chars.map(c => String.fromCharCode(c)).join('');
+                                } else {
+                                  // Keep as hex with spaces
+                                  displayValue = chars.map(c => c.toString(16).padStart(2, '0')).join(' ');
+                                }
+                              }
+                            } catch {
+                              // Keep original value if parsing fails
+                            }
+                            
+                            return {
+                              address: `0x${item.address.toString(16)}`,
+                              value: displayValue,
+                              type: "string" as ScanValueType,
+                              description,
+                            };
+                          } else {
+                            return {
+                              address: `0x${item.address.toString(16)}`,
+                              value: convertHexBytesToValue(
+                                item.value,
+                                prev.scanSettings.valueType,
+                                prev.searchPatternLength
+                              ),
+                              type: prev.scanSettings.valueType,
+                              description: "Scan result",
+                            };
+                          }
                         }
                       );
                     
@@ -980,6 +1024,35 @@ export const useScannerState = () => {
         );
       }
 
+      // YARA scan mode - use YARA API with progress polling
+      if ((currentSettings as any).searchMode === "yara") {
+        const yaraRule = (currentSettings as any).yaraRule || "";
+        if (!yaraRule.trim()) {
+          throw new Error("YARA rule is required for YARA scan mode");
+        }
+
+        console.log(`Starting YARA scan with rule:`, yaraRule);
+
+        const yaraRequest = {
+          rule: yaraRule,
+          address_ranges: addressRanges,
+          scan_id: currentScanId,
+          align: currentSettings.alignment,
+          do_suspend: currentSettings.doSuspend,
+        };
+
+        const yaraResponse = await apiClient.yaraScan(yaraRequest);
+        console.log(`YARA scan response:`, yaraResponse);
+
+        if (!yaraResponse.success) {
+          throw new Error(yaraResponse.message || "YARA scan failed");
+        }
+
+        // Start progress polling - YARA scan runs in background like normal scan
+        startProgressPolling(currentScanId);
+        return; // Exit early - results will be fetched via progress polling
+      }
+
       // Convert the search value to hex bytes based on data type
       const pattern = convertValueToHexBytes(
         currentSettings.value,
@@ -1101,6 +1174,8 @@ export const useScannerState = () => {
             executable: currentSettings.executable,
             readable: currentSettings.readable,
             doSuspend: currentSettings.doSuspend,
+            searchMode: (currentSettings as any).searchMode || "normal",
+            yaraRule: (currentSettings as any).yaraRule || "",
           },
         };
         uiActions.addScanHistory(newItem);

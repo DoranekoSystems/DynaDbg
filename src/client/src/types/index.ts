@@ -87,6 +87,24 @@ export interface ScanResult {
   type: ScanValueType;
 }
 
+// YARA scan types
+export interface YaraMatch {
+  rule_name: string;
+  address: number;
+  length: number;
+  pattern_id: string;
+  matched_data: string;
+}
+
+export interface YaraScanResponse {
+  success: boolean;
+  message: string;
+  scan_id: string;
+  matches: YaraMatch[];
+  total_matches: number;
+  scanned_bytes: number;
+}
+
 export type ScanValueType =
   | "int8"
   | "uint8"
@@ -117,6 +135,8 @@ export interface ScanSettings {
   executable: boolean | null; // true = required, false = excluded, null = don't care
   readable: boolean | null; // true = required, false = excluded, null = don't care
   doSuspend: boolean;
+  searchMode: "normal" | "yara"; // Toggle between normal value search and YARA rule search
+  yaraRule?: string; // YARA rule source code
 }
 
 export type ScanType =

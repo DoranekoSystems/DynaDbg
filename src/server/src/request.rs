@@ -52,6 +52,47 @@ pub struct MemoryFilterRequest {
     pub do_suspend: bool,
 }
 
+// YARA memory scan request
+#[derive(Deserialize, Clone)]
+pub struct YaraScanRequest {
+    /// YARA rule source code
+    pub rule: String,
+    /// Memory address ranges to scan
+    pub address_ranges: Vec<(usize, usize)>,
+    /// Unique scan identifier
+    pub scan_id: String,
+    /// Alignment for match addresses (filter results to aligned addresses)
+    pub align: usize,
+    /// Suspend process during scan
+    pub do_suspend: bool,
+}
+
+// YARA match result
+#[derive(Serialize, Clone)]
+pub struct YaraMatch {
+    /// Rule identifier that matched
+    pub rule_name: String,
+    /// Address where match was found
+    pub address: usize,
+    /// Length of matched data
+    pub length: usize,
+    /// Pattern identifier within the rule
+    pub pattern_id: String,
+    /// Matched data as hex string (first 64 bytes max)
+    pub matched_data: String,
+}
+
+// YARA scan response
+#[derive(Serialize)]
+pub struct YaraScanResponse {
+    pub success: bool,
+    pub message: String,
+    pub scan_id: String,
+    pub matches: Vec<YaraMatch>,
+    pub total_matches: usize,
+    pub scanned_bytes: u64,
+}
+
 #[derive(Deserialize)]
 pub struct ExploreDirectoryRequest {
     pub path: String,

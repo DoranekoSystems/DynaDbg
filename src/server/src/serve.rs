@@ -145,6 +145,16 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
             api::memory_scan_handler(pid_state, scan_request).await
         });
 
+    let yara_scan = api
+        .and(warp::path!("memory" / "yara"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(api::with_auth())
+        .and(api::with_state(pid_state.clone()))
+        .and_then(|scan_request, pid_state| async move {
+            api::yara_scan_handler(pid_state, scan_request).await
+        });
+
     let memory_filter = api
         .and(warp::path!("memory" / "filter"))
         .and(warp::post())
@@ -650,6 +660,7 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
     let memory_routes = read_memory
         .or(write_memory)
         .or(enum_regions)
+        .or(yara_scan)
         .or(memory_scan)
         .or(memory_filter)
         .or(get_scan_progress)

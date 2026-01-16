@@ -59,6 +59,7 @@ export const useScanHistory = () => {
         executable: scanSettings.executable,
         readable: scanSettings.readable,
         doSuspend: scanSettings.doSuspend,
+        searchMode: scanSettings.searchMode,
       },
     };
 

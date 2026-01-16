@@ -185,6 +185,8 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
     executable: null as boolean | null,
     readable: null as boolean | null,
     doSuspend: false,
+    searchMode: "normal" as "normal" | "yara",
+    yaraRule: "",
   };
 
   const scanSettings = { ...defaultScanSettings, ...rawScanSettings };
@@ -345,7 +347,93 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
         </Box>
       </Box>
       <SidebarContent>
-        {/* Value Type Selection */}
+        {/* Search Mode Toggle (YARA / Normal) */}
+        <ScanSection>
+          <ScanSectionHeader>
+            <ResponsiveTypography
+              variant="subtitle2"
+              sx={{
+                fontWeight: 600,
+                fontSize: "10px",
+                color: "#4fc1ff",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+              }}
+            >
+              Search Mode
+            </ResponsiveTypography>
+          </ScanSectionHeader>
+          <ScanSectionContent>
+            <RadioGroup
+              row
+              value={scanSettings.searchMode || "normal"}
+              onChange={(e) =>
+                handleSettingChange(
+                  "searchMode",
+                  e.target.value as "normal" | "yara"
+                )
+              }
+            >
+              <ResponsiveFormControlLabel
+                value="normal"
+                control={<Radio size="small" disabled={isSettingsLocked} />}
+                label="Normal"
+                sx={{ mr: 2 }}
+              />
+              <ResponsiveFormControlLabel
+                value="yara"
+                control={<Radio size="small" disabled={isSettingsLocked} />}
+                label="YARA"
+              />
+            </RadioGroup>
+          </ScanSectionContent>
+        </ScanSection>
+
+        {/* YARA Rule Input - only show in YARA mode */}
+        {scanSettings.searchMode === "yara" && (
+          <ScanSection>
+            <ScanSectionHeader>
+              <ResponsiveTypography
+                variant="subtitle2"
+                sx={{
+                  fontWeight: 600,
+                  fontSize: "10px",
+                  color: "#4fc1ff",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                YARA Rule
+              </ResponsiveTypography>
+            </ScanSectionHeader>
+            <ScanSectionContent>
+              <ResponsiveTextField
+                fullWidth
+                multiline
+                rows={6}
+                size="small"
+                placeholder={`rule example {
+  strings:
+    $a = "pattern"
+  condition:
+    $a
+}`}
+                value={scanSettings.yaraRule || ""}
+                disabled={isSettingsLocked}
+                onChange={(e) => handleSettingChange("yaraRule", e.target.value)}
+                sx={{
+                  "& .MuiInputBase-root": {
+                    fontFamily: "monospace",
+                    fontSize: "11px",
+                  },
+                }}
+              />
+            </ScanSectionContent>
+          </ScanSection>
+        )}
+
+        {/* Value Type Selection - hide in YARA mode */}
+        {scanSettings.searchMode !== "yara" && (
         <ScanSection>
           <ScanSectionHeader>
             <ResponsiveTypography
@@ -382,8 +470,10 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
             </ResponsiveFormControl>
           </ScanSectionContent>
         </ScanSection>
+        )}
 
-        {/* Scan Type Selection */}
+        {/* Scan Type Selection - hide in YARA mode */}
+        {scanSettings.searchMode !== "yara" && (
         <ScanSection>
           <ScanSectionHeader>
             <ResponsiveTypography
@@ -420,9 +510,10 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
             </ResponsiveFormControl>
           </ScanSectionContent>
         </ScanSection>
+        )}
 
-        {/* Value Input */}
-        {(needsValue || isComparisonType) && (
+        {/* Value Input - hide in YARA mode */}
+        {scanSettings.searchMode !== "yara" && (needsValue || isComparisonType) && (
           <ScanSection>
             <ScanSectionHeader>
               <ResponsiveTypography
@@ -826,9 +917,12 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
             disabled={
               isScanning ||
               scanResults > 0 || // Disable if any results exist (after lookup)
-              (needsValue &&
+              // YARA mode: require yaraRule
+              (scanSettings.searchMode === "yara" && !(scanSettings.yaraRule || "").trim()) ||
+              // Normal mode: require value for non-comparison types
+              (scanSettings.searchMode !== "yara" && needsValue &&
                 !(scanSettings.value || "").trim() &&
-                !isComparisonType) || // Only require value for non-comparison types
+                !isComparisonType) ||
               (scanSettings.scanMode === "regions" && !memoryRegionsLoaded)
             }
             color="primary"
@@ -844,6 +938,8 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
             disabled={
               isScanning ||
               !canNextScan ||
+              // YARA mode doesn't support filtering
+              scanSettings.searchMode === "yara" ||
               (needsValue &&
                 !(scanSettings.value || "").trim() &&
                 !isComparisonType) // Allow comparison types without value
@@ -872,6 +968,8 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
                 executable: false,
                 readable: true,
                 doSuspend: false,
+                searchMode: "normal",
+                yaraRule: "",
               });
               onClearScan?.();
               onNewScan?.();

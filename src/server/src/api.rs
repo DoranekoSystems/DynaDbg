@@ -4692,7 +4692,7 @@ pub async fn get_app_icon_handler(
 
 // Spawn app via FBSSystemService (iOS/macOS)
 pub async fn spawn_app_handler(
-    pid_state: Arc<Mutex<Option<i32>>>,
+    _pid_state: Arc<Mutex<Option<i32>>>,
     _request: request::SpawnAppRequest,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -4742,7 +4742,7 @@ pub async fn spawn_app_handler(
 
 // Spawn process via fork/exec (Linux)
 pub async fn spawn_process_handler(
-    _pid_state: Arc<Mutex<Option<i32>>>,
+    pid_state: Arc<Mutex<Option<i32>>>,
     _request: request::SpawnProcessRequest,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     #[cfg(target_os = "linux")]
@@ -4815,7 +4815,7 @@ pub async fn spawn_process_handler(
 
 // Spawn process with PTY (Linux)
 pub async fn spawn_process_with_pty_handler(
-    _pid_state: Arc<Mutex<Option<i32>>>,
+    pid_state: Arc<Mutex<Option<i32>>>,
     _request: request::SpawnProcessWithPtyRequest,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     #[cfg(target_os = "linux")]
@@ -5201,4 +5201,237 @@ pub async fn wasm_info_handler() -> Result<impl warp::Reply, warp::Rejection> {
     });
     
     Ok(warp::reply::json(&response))
+}
+
+/// YARA memory scan handler
+/// Scans process memory using YARA rules with progress tracking
+pub async fn yara_scan_handler(
+    pid_state: Arc<Mutex<Option<i32>>>,
+    scan_request: request::YaraScanRequest,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let pid = pid_state.lock().unwrap();
+
+    let mut is_suspend_success: bool = false;
+    let do_suspend = scan_request.do_suspend;
+    
+    if let Some(pid) = *pid {
+        if do_suspend {
+            unsafe {
+                is_suspend_success = native_bridge::suspend_process(pid);
+            }
+        }
+
+        // Compile YARA rules first to validate
+        let mut compiler = yara_x::Compiler::new();
+        if let Err(e) = compiler.add_source(scan_request.rule.as_str()) {
+            if do_suspend && is_suspend_success {
+                unsafe {
+                    native_bridge::resume_process(pid);
+                }
+            }
+            let response = request::YaraScanResponse {
+                success: false,
+                message: format!("YARA compilation error: {}", e),
+                scan_id: scan_request.scan_id.clone(),
+                matches: vec![],
+                total_matches: 0,
+                scanned_bytes: 0,
+            };
+            return Ok(warp::reply::json(&response));
+        }
+
+        // Initialize progress tracking
+        let total_bytes: u64 = scan_request.address_ranges.iter()
+            .map(|(start, end)| (end - start) as u64)
+            .sum();
+        
+        {
+            let mut global_scan_progress = GLOBAL_SCAN_PROGRESS.write().unwrap();
+            global_scan_progress.insert(scan_request.scan_id.clone(), request::ScanProgressResponse {
+                scan_id: scan_request.scan_id.clone(),
+                progress_percentage: 0.0,
+                scanned_bytes: 0,
+                total_bytes,
+                is_scanning: true,
+                current_region: Some("YARA scan".to_string()),
+            });
+        }
+
+        // Clear previous results
+        {
+            let mut global_positions = GLOBAL_POSITIONS.write().unwrap();
+            global_positions.insert(scan_request.scan_id.clone(), Vec::new());
+            let mut global_memory = GLOBAL_MEMORY.write().unwrap();
+            global_memory.insert(scan_request.scan_id.clone(), Vec::new());
+        }
+
+        // Create stop flag
+        let stop_flag = Arc::new(Mutex::new(false));
+        {
+            let mut scan_stop_flags = SCAN_STOP_FLAGS.write().unwrap();
+            scan_stop_flags.insert(scan_request.scan_id.clone(), stop_flag.clone());
+        }
+
+        let scan_id = scan_request.scan_id.clone();
+        let address_ranges = scan_request.address_ranges.clone();
+        let rule_source = scan_request.rule.clone();
+        let align = scan_request.align;
+
+        // Start background scan thread
+        std::thread::spawn(move || {
+            // Recompile rules in this thread
+            let mut compiler = yara_x::Compiler::new();
+            if compiler.add_source(rule_source.as_str()).is_err() {
+                return;
+            }
+            let rules = compiler.build();
+            let mut scanner = yara_x::Scanner::new(&rules);
+            
+            // Use the same types as GLOBAL_POSITIONS and GLOBAL_MEMORY
+            let mut all_positions: Vec<(usize, String)> = Vec::new();
+            let mut all_memory: Vec<(usize, Vec<u8>, usize, Vec<u8>, usize, bool)> = Vec::new();
+            let mut scanned_bytes: u64 = 0;
+
+            // Scan each memory region
+            for (start_address, end_address) in &address_ranges {
+                // Check stop flag
+                if *stop_flag.lock().unwrap() {
+                    break;
+                }
+
+                let size = end_address - start_address;
+                if size == 0 {
+                    continue;
+                }
+
+                // Read memory in chunks
+                let chunk_size: usize = 16 * 1024 * 1024; // 16MB chunks
+                let mut offset: usize = 0;
+
+                while offset < size {
+                    // Check stop flag
+                    if *stop_flag.lock().unwrap() {
+                        break;
+                    }
+
+                    let current_chunk_size = std::cmp::min(chunk_size, size - offset);
+                    let current_address = start_address + offset;
+                    
+                    let mut buffer = vec![0u8; current_chunk_size];
+                    let bytes_read = match native_bridge::read_process_memory(
+                        pid,
+                        current_address as *mut c_void,
+                        current_chunk_size,
+                        &mut buffer,
+                    ) {
+                        Ok(n) => n as usize,
+                        Err(_) => 0,
+                    };
+
+                    if bytes_read > 0 {
+                        buffer.truncate(bytes_read);
+                        scanned_bytes += bytes_read as u64;
+
+                        // Update progress
+                        {
+                            if let Ok(mut progress) = GLOBAL_SCAN_PROGRESS.write() {
+                                if let Some(p) = progress.get_mut(&scan_id) {
+                                    p.scanned_bytes = scanned_bytes;
+                                    p.progress_percentage = (scanned_bytes as f64 / total_bytes as f64) * 100.0;
+                                }
+                            }
+                        }
+
+                        // Scan buffer with YARA
+                        if let Ok(results) = scanner.scan(&buffer) {
+                            for matched_rule in results.matching_rules() {
+                                for pattern in matched_rule.patterns() {
+                                    for m in pattern.matches() {
+                                        let match_offset = m.range().start;
+                                        let match_len = m.range().len();
+                                        let match_address = current_address + match_offset;
+                                        
+                                        // Apply alignment filter
+                                        if align > 1 && match_address % align != 0 {
+                                            continue;
+                                        }
+                                        
+                                        // Get matched data (exact match length)
+                                        if match_offset + match_len <= buffer.len() {
+                                            // Create hex string with rule info
+                                            let matched_data = &buffer[match_offset..match_offset + match_len];
+                                            let rule_info = format!("{}::{}", matched_rule.identifier(), pattern.identifier());
+                                            let hex_value = format!("{}|{}", rule_info, hex::encode(matched_data));
+                                            
+                                            all_positions.push((match_address, hex_value.clone()));
+                                            
+                                            // For GLOBAL_MEMORY: (address, current_bytes, size, original_bytes, value_size, is_freeze)
+                                            all_memory.push((
+                                                match_address,
+                                                matched_data.to_vec(),
+                                                match_len,
+                                                matched_data.to_vec(),
+                                                match_len,
+                                                false,
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    offset += current_chunk_size;
+                }
+            }
+
+            // Resume process if suspended
+            if do_suspend && is_suspend_success {
+                unsafe {
+                    native_bridge::resume_process(pid);
+                }
+            }
+
+            // Store results
+            {
+                let mut global_positions = GLOBAL_POSITIONS.write().unwrap();
+                global_positions.insert(scan_id.clone(), all_positions);
+                let mut global_memory = GLOBAL_MEMORY.write().unwrap();
+                global_memory.insert(scan_id.clone(), all_memory);
+            }
+
+            // Mark scan as complete
+            {
+                if let Ok(mut progress) = GLOBAL_SCAN_PROGRESS.write() {
+                    if let Some(p) = progress.get_mut(&scan_id) {
+                        p.scanned_bytes = scanned_bytes;
+                        p.progress_percentage = 100.0;
+                        p.is_scanning = false;
+                    }
+                }
+            }
+        });
+
+        // Return immediately with scan started response
+        let response = request::YaraScanResponse {
+            success: true,
+            message: "YARA scan started".to_string(),
+            scan_id: scan_request.scan_id,
+            matches: vec![],
+            total_matches: 0,
+            scanned_bytes: 0,
+        };
+
+        Ok(warp::reply::json(&response))
+    } else {
+        let response = request::YaraScanResponse {
+            success: false,
+            message: "No process attached".to_string(),
+            scan_id: scan_request.scan_id,
+            matches: vec![],
+            total_matches: 0,
+            scanned_bytes: 0,
+        };
+        Ok(warp::reply::json(&response))
+    }
 }
