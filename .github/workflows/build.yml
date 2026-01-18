@@ -600,7 +600,7 @@ jobs:
 
       - name: Clone MachOKit
         run: |
-          git clone --depth 1 https://github.com/p-x9/MachOKit.git MachOKit
+          git clone --depth 1 https://github.com/p-x9/MachOKit.git src/MachOKit
 
       - name: Cache MachOBridge build
         id: cache-machobridge-ios
@@ -608,7 +608,7 @@ jobs:
         with:
           path: |
             src/server/src/swift/.build-xcode-ios
-          key: ${{ runner.os }}-machobridge-ios-${{ hashFiles('src/server/src/swift/**/*.swift', 'MachOKit/**/*.swift') }}
+          key: ${{ runner.os }}-machobridge-ios-${{ hashFiles('src/server/src/swift/**/*.swift', 'src/MachOKit/**/*.swift') }}
 
       - name: Build MachOBridge for iOS
         if: steps.cache-machobridge-ios.outputs.cache-hit != 'true'
@@ -665,7 +665,7 @@ jobs:
 
       - name: Clone MachOKit
         run: |
-          git clone --depth 1 https://github.com/p-x9/MachOKit.git MachOKit
+          git clone --depth 1 https://github.com/p-x9/MachOKit.git src/MachOKit
 
       - name: Cache MachOBridge build
         id: cache-machobridge-macos
@@ -673,7 +673,7 @@ jobs:
         with:
           path: |
             src/server/src/swift/.build-xcode-macos
-          key: ${{ runner.os }}-machobridge-macos-${{ hashFiles('src/server/src/swift/**/*.swift', 'MachOKit/**/*.swift') }}
+          key: ${{ runner.os }}-machobridge-macos-${{ hashFiles('src/server/src/swift/**/*.swift', 'src/MachOKit/**/*.swift') }}
 
       - name: Build MachOBridge for macOS
         if: steps.cache-machobridge-macos.outputs.cache-hit != 'true'
