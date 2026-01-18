@@ -124,6 +124,7 @@ export const useScanHistory = () => {
       string: "String",
       bytes: "Bytes",
       regex: "Regex",
+      ptr: "Pointer",
     };
     return displayNames[valueType] || valueType;
   };

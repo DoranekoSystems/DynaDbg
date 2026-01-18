@@ -14,9 +14,10 @@ import {
   InputLabel,
   Radio,
   RadioGroup,
+  IconButton,
 } from "@mui/material";
 import { styled } from "@mui/material/styles";
-import { Search, Refresh, TuneRounded } from "@mui/icons-material";
+import { Search, Refresh, TuneRounded, Delete, Map as MapIcon, ExpandMore, ExpandLess } from "@mui/icons-material";
 import { borderColors } from "../utils/theme";
 import { ScanValueType, ScanType, ScanSettings } from "../types/index";
 import { useAppState } from "../hooks/useAppState";
@@ -169,6 +170,9 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
   // Use global app state
   const { ui, uiActions } = useAppState();
   const rawScanSettings = ui.scannerState.scanSettings;
+  
+  // Collapse state for Search Mode section
+  const [searchModeCollapsed, setSearchModeCollapsed] = React.useState(true);
 
   // デフォルト値で補完したスキャン設定を作成
   const defaultScanSettings = {
@@ -185,8 +189,11 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
     executable: null as boolean | null,
     readable: null as boolean | null,
     doSuspend: false,
-    searchMode: "normal" as "normal" | "yara",
+    searchMode: "normal" as "normal" | "yara" | "ptr",
     yaraRule: "",
+    ptrMapFilePaths: [] as Array<{ path: string; name: string; targetAddress?: string }>,
+    ptrMaxDepth: 5,
+    ptrMaxOffset: 4096,
   };
 
   const scanSettings = { ...defaultScanSettings, ...rawScanSettings };
@@ -347,9 +354,12 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
         </Box>
       </Box>
       <SidebarContent>
-        {/* Search Mode Toggle (YARA / Normal) */}
+        {/* Search Mode Toggle (Normal / YARA / PTR) - Collapsible */}
         <ScanSection>
-          <ScanSectionHeader>
+          <ScanSectionHeader
+            sx={{ cursor: "pointer", justifyContent: "space-between" }}
+            onClick={() => setSearchModeCollapsed(!searchModeCollapsed)}
+          >
             <ResponsiveTypography
               variant="subtitle2"
               sx={{
@@ -360,9 +370,15 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
                 letterSpacing: "0.5px",
               }}
             >
-              Search Mode
+              Search Mode: {(scanSettings.searchMode || "normal").toUpperCase()}
             </ResponsiveTypography>
+            {searchModeCollapsed ? (
+              <ExpandMore sx={{ fontSize: 16, color: "#888" }} />
+            ) : (
+              <ExpandLess sx={{ fontSize: 16, color: "#888" }} />
+            )}
           </ScanSectionHeader>
+          {!searchModeCollapsed && (
           <ScanSectionContent>
             <RadioGroup
               row
@@ -370,7 +386,7 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
               onChange={(e) =>
                 handleSettingChange(
                   "searchMode",
-                  e.target.value as "normal" | "yara"
+                  e.target.value as "normal" | "yara" | "ptr"
                 )
               }
             >
@@ -378,15 +394,22 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
                 value="normal"
                 control={<Radio size="small" disabled={isSettingsLocked} />}
                 label="Normal"
-                sx={{ mr: 2 }}
+                sx={{ mr: 1 }}
               />
               <ResponsiveFormControlLabel
                 value="yara"
                 control={<Radio size="small" disabled={isSettingsLocked} />}
                 label="YARA"
+                sx={{ mr: 1 }}
+              />
+              <ResponsiveFormControlLabel
+                value="ptr"
+                control={<Radio size="small" disabled={isSettingsLocked} />}
+                label="PTR"
               />
             </RadioGroup>
           </ScanSectionContent>
+          )}
         </ScanSection>
 
         {/* YARA Rule Input - only show in YARA mode */}
@@ -432,8 +455,226 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
           </ScanSection>
         )}
 
-        {/* Value Type Selection - hide in YARA mode */}
-        {scanSettings.searchMode !== "yara" && (
+        {/* PTR Scan Settings - only show in PTR mode */}
+        {scanSettings.searchMode === "ptr" && (
+          <ScanSection>
+            <ScanSectionHeader>
+              <ResponsiveTypography
+                variant="subtitle2"
+                sx={{
+                  fontWeight: 600,
+                  fontSize: "10px",
+                  color: "#4fc1ff",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                Pointer Scan Settings
+              </ResponsiveTypography>
+            </ScanSectionHeader>
+            <ScanSectionContent>
+              <Stack spacing={1}>
+                <ResponsiveTypography
+                  variant="caption"
+                  sx={{
+                    fontSize: "10px",
+                    color: "#9cdcfe",
+                  }}
+                >
+                  Select 2 or more PointerMap files (.dptr) to find common pointer paths.
+                  Generate PointerMaps from Bookmarks tab first.
+                </ResponsiveTypography>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                  <ResponsiveButton
+                    variant="outlined"
+                    size="small"
+                    disabled={isSettingsLocked}
+                    onClick={async () => {
+                      console.log("Button clicked, isSettingsLocked:", isSettingsLocked);
+                      try {
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        console.log("Invoking open_pointermap_files_dialog...");
+                        const files = await invoke<{ path: string; name: string }[]>("open_pointermap_files_dialog");
+                        console.log("Files received:", files);
+                        if (files && files.length > 0) {
+                          // Get existing files
+                          const existingFiles = scanSettings.ptrMapFilePaths || [];
+                          console.log("Existing files:", existingFiles);
+                          const existingPaths = new Set(existingFiles.map((f: { path: string }) => f.path));
+                          // Filter out duplicates and add new files with parsed target address
+                          const newFiles = files
+                            .filter(f => !existingPaths.has(f.path))
+                            .map(f => {
+                              // Parse target address from filename: pointermap_XXXXXX_timestamp.dptr
+                              const match = f.name.match(/pointermap_([0-9A-Fa-f]+)_/);
+                              const targetAddress = match ? `0x${match[1].toUpperCase()}` : "";
+                              return { ...f, targetAddress };
+                            });
+                          const allFiles = [...existingFiles, ...newFiles];
+                          console.log("Setting ptrMapFilePaths to:", allFiles);
+                          handleSettingChange("ptrMapFilePaths", allFiles);
+                          console.log("After handleSettingChange, scanSettings.ptrMapFilePaths:", scanSettings.ptrMapFilePaths);
+                        }
+                      } catch (error) {
+                        console.error("Failed to open file dialog:", error);
+                      }
+                    }}
+                    sx={{ textTransform: "none" }}
+                  >
+                    Add PointerMap Files...
+                  </ResponsiveButton>
+                  {scanSettings.ptrMapFilePaths && scanSettings.ptrMapFilePaths.length > 0 && (
+                    <>
+                      <Box sx={{ 
+                        backgroundColor: "#1e1e1e", 
+                        borderRadius: "4px", 
+                        maxHeight: "200px",
+                        overflow: "auto"
+                      }}>
+                        {scanSettings.ptrMapFilePaths.map((file: { path: string; name: string; targetAddress?: string }, idx: number) => (
+                          <Box
+                            key={file.path}
+                            sx={{
+                              display: "flex",
+                              flexDirection: "column",
+                              px: 0.5,
+                              py: 0.5,
+                              borderBottom: idx < scanSettings.ptrMapFilePaths.length - 1 ? "1px solid #333" : "none",
+                              "&:hover": {
+                                backgroundColor: "#2a2a2a",
+                              },
+                            }}
+                          >
+                            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                              <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, flex: 1, minWidth: 0 }}>
+                                <MapIcon sx={{ fontSize: "12px", color: "#4fc1ff", flexShrink: 0 }} />
+                                <ResponsiveTypography
+                                  variant="caption"
+                                  sx={{
+                                    fontSize: "9px",
+                                    color: "#4fc1ff",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                  title={file.path}
+                                >
+                                  {file.name}
+                                </ResponsiveTypography>
+                              </Box>
+                              <IconButton
+                                size="small"
+                                disabled={isSettingsLocked}
+                                onClick={() => {
+                                  const newFiles = scanSettings.ptrMapFilePaths.filter((f: { path: string }) => f.path !== file.path);
+                                  handleSettingChange("ptrMapFilePaths", newFiles);
+                                  handleSettingChange("ptrMapFiles", newFiles.map((f: { name: string }) => f.name));
+                                }}
+                                sx={{ p: 0.25, color: "#f48771" }}
+                              >
+                                <Delete sx={{ fontSize: "12px" }} />
+                              </IconButton>
+                            </Box>
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mt: 0.25, ml: 2 }}>
+                              <ResponsiveTypography
+                                variant="caption"
+                                sx={{ fontSize: "8px", color: "#888", flexShrink: 0 }}
+                              >
+                                Target:
+                              </ResponsiveTypography>
+                              <input
+                                type="text"
+                                value={file.targetAddress || ""}
+                                disabled={isSettingsLocked}
+                                placeholder="0x..."
+                                onChange={(e) => {
+                                  const newFiles = scanSettings.ptrMapFilePaths.map((f: { path: string; name: string; targetAddress?: string }) =>
+                                    f.path === file.path ? { ...f, targetAddress: e.target.value } : f
+                                  );
+                                  handleSettingChange("ptrMapFilePaths", newFiles);
+                                }}
+                                style={{
+                                  flex: 1,
+                                  backgroundColor: "#2d2d2d",
+                                  border: "1px solid #444",
+                                  borderRadius: "3px",
+                                  color: "#9cdcfe",
+                                  fontFamily: "monospace",
+                                  fontSize: "10px",
+                                  padding: "2px 4px",
+                                  outline: "none",
+                                  minWidth: 0,
+                                }}
+                              />
+                            </Box>
+                          </Box>
+                        ))}
+                      </Box>
+                      <ResponsiveButton
+                        variant="text"
+                        size="small"
+                        color="error"
+                        disabled={isSettingsLocked}
+                        onClick={() => {
+                          handleSettingChange("ptrMapFilePaths", []);
+                          handleSettingChange("ptrMapFiles", []);
+                        }}
+                        sx={{ textTransform: "none", fontSize: "9px", minHeight: "20px", p: 0.5 }}
+                      >
+                        Clear All
+                      </ResponsiveButton>
+                    </>
+                  )}
+                  {scanSettings.ptrMapFilePaths && scanSettings.ptrMapFilePaths.length > 0 && 
+                   scanSettings.ptrMapFilePaths.length < 2 && (
+                    <ResponsiveTypography
+                      variant="caption"
+                      sx={{
+                        fontSize: "9px",
+                        color: "#f48771",
+                      }}
+                    >
+                      ⚠ Need at least 2 PointerMap files
+                    </ResponsiveTypography>
+                  )}
+                </Box>
+                <ResponsiveTextField
+                  fullWidth
+                  size="small"
+                  label="Max Depth"
+                  type="number"
+                  value={scanSettings.ptrMaxDepth || 5}
+                  disabled={isSettingsLocked}
+                  onChange={(e) => handleSettingChange("ptrMaxDepth", parseInt(e.target.value) || 5)}
+                  inputProps={{ min: 1, max: 10 }}
+                />
+                <ResponsiveTextField
+                  fullWidth
+                  size="small"
+                  label="Max Offset (hex)"
+                  placeholder="0x1000"
+                  value={`0x${(scanSettings.ptrMaxOffset || 4096).toString(16).toUpperCase()}`}
+                  disabled={isSettingsLocked}
+                  onChange={(e) => {
+                    const val = e.target.value.replace(/^0x/i, "");
+                    const num = parseInt(val, 16);
+                    if (!isNaN(num) && num >= 0) {
+                      handleSettingChange("ptrMaxOffset", num);
+                    }
+                  }}
+                  sx={{
+                    "& .MuiInputBase-input": {
+                      fontFamily: "monospace",
+                    },
+                  }}
+                />
+              </Stack>
+            </ScanSectionContent>
+          </ScanSection>
+        )}
+
+        {/* Value Type Selection - hide in YARA/PTR mode */}
+        {scanSettings.searchMode !== "yara" && scanSettings.searchMode !== "ptr" && (
         <ScanSection>
           <ScanSectionHeader>
             <ResponsiveTypography
@@ -472,8 +713,8 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
         </ScanSection>
         )}
 
-        {/* Scan Type Selection - hide in YARA mode */}
-        {scanSettings.searchMode !== "yara" && (
+        {/* Scan Type Selection - hide in YARA/PTR mode */}
+        {scanSettings.searchMode !== "yara" && scanSettings.searchMode !== "ptr" && (
         <ScanSection>
           <ScanSectionHeader>
             <ResponsiveTypography
@@ -512,8 +753,8 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
         </ScanSection>
         )}
 
-        {/* Value Input - hide in YARA mode */}
-        {scanSettings.searchMode !== "yara" && (needsValue || isComparisonType) && (
+        {/* Value Input - hide in YARA/PTR mode */}
+        {scanSettings.searchMode !== "yara" && scanSettings.searchMode !== "ptr" && (needsValue || isComparisonType) && (
           <ScanSection>
             <ScanSectionHeader>
               <ResponsiveTypography
@@ -764,7 +1005,8 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
           </ScanSectionContent>
         </ScanSection>
 
-        {/* Memory Protection */}
+        {/* Memory Protection - hide in PTR mode */}
+        {scanSettings.searchMode !== "ptr" && (
         <ScanSection>
           <ScanSectionHeader>
             <ResponsiveTypography
@@ -868,6 +1110,7 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
             </ResponsiveBox>
           </ScanSectionContent>
         </ScanSection>
+        )}
 
         {/* Setting */}
         <ScanSection>
@@ -917,10 +1160,16 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
             disabled={
               isScanning ||
               scanResults > 0 || // Disable if any results exist (after lookup)
+              // PTR mode: require at least 2 files with target addresses
+              (scanSettings.searchMode === "ptr" && (
+                !scanSettings.ptrMapFilePaths || 
+                scanSettings.ptrMapFilePaths.length < 2 ||
+                scanSettings.ptrMapFilePaths.some((f: { targetAddress?: string }) => !f.targetAddress)
+              )) ||
               // YARA mode: require yaraRule
               (scanSettings.searchMode === "yara" && !(scanSettings.yaraRule || "").trim()) ||
               // Normal mode: require value for non-comparison types
-              (scanSettings.searchMode !== "yara" && needsValue &&
+              (scanSettings.searchMode === "normal" && needsValue &&
                 !(scanSettings.value || "").trim() &&
                 !isComparisonType) ||
               (scanSettings.scanMode === "regions" && !memoryRegionsLoaded)
@@ -954,7 +1203,9 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
             variant="text"
             startIcon={<Refresh />}
             onClick={() => {
-              // Reset settings to defaults
+              // Save current searchMode before reset
+              const currentSearchMode = scanSettings.searchMode || "normal";
+              // Reset settings to defaults but keep searchMode
               uiActions.setScanSettings({
                 valueType: "int32",
                 scanType: "exact",
@@ -968,7 +1219,7 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
                 executable: false,
                 readable: true,
                 doSuspend: false,
-                searchMode: "normal",
+                searchMode: currentSearchMode, // Keep the current search mode
                 yaraRule: "",
               });
               onClearScan?.();

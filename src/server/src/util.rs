@@ -71,6 +71,12 @@ pub fn resolve_nested_address(
     nested_addr: &str,
     modules: &[serde_json::Value],
 ) -> Result<u64, String> {
+    // Check if it's the arrow format: "base → [0x10] → [0x20]"
+    if nested_addr.contains(" → ") {
+        return resolve_arrow_format_address(pid, nested_addr, modules);
+    }
+    
+    // Original nested bracket format: [[base+0x10]+0x20]
     let re = Regex::new(r"(\[)|(\])|([^\[\]]+)").map_err(|e| format!("Regex error: {}", e))?;
     let mut stack = Vec::new();
     let mut current_expr = String::new();
@@ -100,6 +106,47 @@ pub fn resolve_nested_address(
     }
 
     resolve_single_level_address(&current_expr, modules)
+}
+
+/// Resolve arrow format pointer chain: "base → [0x10] → [0x20]"
+/// This format means: read memory at (base + 0x10), then read memory at (result + 0x20)
+fn resolve_arrow_format_address(
+    pid: i32,
+    addr: &str,
+    modules: &[serde_json::Value],
+) -> Result<u64, String> {
+    let parts: Vec<&str> = addr.split(" → ").collect();
+    
+    if parts.is_empty() {
+        return Err("Empty pointer chain".to_string());
+    }
+    
+    // First part is the base address (e.g., "Tutorial-x86_64.exe+0x34eca0")
+    let base_str = parts[0].trim();
+    let mut current_addr = resolve_single_level_address(base_str, modules)?;
+    
+    // For each subsequent part, extract offset and dereference
+    for i in 1..parts.len() {
+        let part = parts[i].trim();
+        
+        // Extract offset from format like "[0x10]" or "[+0x10]"
+        let offset_str = part
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_start_matches('+')
+            .trim();
+        
+        // Read memory at current address to get pointer value
+        let ptr_value = read_memory_64(pid, current_addr)?;
+        
+        // Parse the offset
+        let offset = parse_number(offset_str)?;
+        
+        // Add offset to pointer value
+        current_addr = ptr_value.wrapping_add(offset);
+    }
+    
+    Ok(current_addr)
 }
 
 pub fn resolve_single_level_address(
@@ -152,7 +199,8 @@ fn preemptive_module_resolution(
             if let Some(file_name) = path.file_name() {
                 let file_name_str = file_name.to_string_lossy();
                 let escaped_name = regex::escape(&file_name_str);
-                let re = Regex::new(&format!(r"\b{}\b", escaped_name))
+                // Use case-insensitive matching for module names
+                let re = Regex::new(&format!(r"(?i)\b{}\b", escaped_name))
                     .map_err(|e| format!("Regex error: {}", e))?;
 
                 resolved = re
@@ -173,7 +221,8 @@ fn preemptive_module_resolution(
 
 fn parse_number(s: &str) -> Result<u64, String> {
     let s = s.trim();
-    if s.starts_with("0x") {
+    // Handle both lowercase 0x and uppercase 0X hex prefix
+    if s.starts_with("0x") || s.starts_with("0X") {
         u64::from_str_radix(&s[2..], 16)
     } else {
         s.parse::<u64>()

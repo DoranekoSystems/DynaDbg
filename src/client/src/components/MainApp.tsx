@@ -225,6 +225,7 @@ const AppContent: React.FC<AppContentProps> = ({
     scanSettings,
     updateFullScanSettings,
     removeBookmark,
+    updateBookmark,
     addManualBookmark,
     isAddressBookmarked,
     handleResultBookmark,
@@ -1581,6 +1582,7 @@ const AppContent: React.FC<AppContentProps> = ({
               onMemoryRead={handleMemoryRead}
               bookmarks={bookmarks}
               onAddManualBookmark={addManualBookmark}
+              onUpdateBookmark={updateBookmark}
               onRemoveBookmark={removeBookmark}
               isAddressBookmarked={isAddressBookmarked}
               attachedModules={attachedModules}

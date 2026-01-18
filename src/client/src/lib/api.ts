@@ -1537,7 +1537,7 @@ class ApiClient {
     query: string
   ): Promise<ApiResponse<{ address: number }>> {
     return this.request<ApiResponse<{ address: number }>>(
-      `/api/utils/resolve-address?query=${encodeURIComponent(query)}`
+      `/api/memory/resolve?query=${encodeURIComponent(query)}`
     );
   }
 
@@ -1669,6 +1669,57 @@ class ApiClient {
         }
 
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return response.arrayBuffer();
+    } catch (error) {
+      if (error instanceof TypeError && error.message.includes("fetch")) {
+        this.notifyConnectionState(
+          false,
+          "Network error - server may be unreachable"
+        );
+        this.stopHealthCheck();
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Generate a full pointermap for the entire process memory
+   * Returns LZ4 compressed binary data in DynaDbg PointerMap format (.dptr)
+   */
+  async generatePointerMap(): Promise<ArrayBuffer> {
+    const headers: { [key: string]: string } = {};
+    if (this.authToken) {
+      headers["Authorization"] = `Bearer ${this.authToken}`;
+    }
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/memory/pointermap`, {
+        method: "GET",
+        headers,
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          this.authToken = null;
+          this.serverSessionId = null;
+          this.notifyConnectionState(
+            false,
+            "Authentication failed - server may have restarted"
+          );
+          throw new Error("Authentication failed - please reconnect");
+        } else if (response.status === 403) {
+          this.notifyConnectionState(false, "Server access denied");
+          throw new Error("Server access denied");
+        }
+
+        try {
+          const errorData = await response.json();
+          throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+        } catch {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
       }
 
       return response.arrayBuffer();

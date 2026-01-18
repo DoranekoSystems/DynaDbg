@@ -53,6 +53,7 @@ import {
   FilterList,
   ArrowUpward,
   ArrowDownward,
+  Map as MapIcon,
 } from "@mui/icons-material";
 import { borderColors } from "../utils/theme";
 import { MainContent, TabContent, TabPanelProps } from "../utils/constants";
@@ -60,6 +61,7 @@ import { useAppState } from "../hooks/useAppState";
 import { useColumnResize } from "../hooks/useColumnResize";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { ColumnResizer } from "./ColumnResizer";
+import { getApiClient } from "../lib/api";
 import {
   normalizeAddressString,
   isLibraryExpression,
@@ -222,8 +224,10 @@ interface ScannerContentProps {
     description?: string,
     libraryExpression?: string,
     size?: number,
-    displayFormat?: "dec" | "hex"
+    displayFormat?: "dec" | "hex",
+    ptrValueType?: Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">
   ) => Promise<boolean>;
+  onUpdateBookmark?: (bookmarkId: string, updates: Partial<BookmarkItem>) => void;
   onRemoveBookmark?: (bookmarkId: string) => void;
   isAddressBookmarked?: (address: string) => boolean;
   attachedModules?: any[]; // ModuleInfo array for library+offset parsing
@@ -282,6 +286,7 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
   // Bookmark props
   bookmarks = [],
   onAddManualBookmark,
+  onUpdateBookmark,
   onRemoveBookmark,
   isAddressBookmarked,
   attachedModules = [],
@@ -313,6 +318,31 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     return stripped;
   }, []);
 
+  // Helper function to format pointer expression for display
+  // Converts [[base+0x10]+0x18] to "base → [+0x10] → [+0x18]"
+  const _formatPointerExpressionForDisplay = useCallback((expr: string): string => {
+    // Extract all parts by matching the pattern
+    const fullPattern = /([A-Za-z0-9_.\-]+\+0x[0-9A-Fa-f]+|\+0x[0-9A-Fa-f]+)/g;
+    const matches = expr.match(fullPattern);
+    
+    if (!matches || matches.length === 0) {
+      return expr;
+    }
+    
+    // First match is the base, rest are offsets
+    const base = matches[0];
+    const offsets = matches.slice(1);
+    
+    // Build readable format: base → [+0x10] → [+0x18]
+    let result = base;
+    for (const offset of offsets) {
+      result += ` → [${offset}]`;
+    }
+    
+    return result;
+  }, []);
+  void _formatPointerExpressionForDisplay; // Reserved for future use
+
   // Helper function to check if an address is watched
   const isAddressWatched = useCallback(
     (address: string): boolean => {
@@ -337,6 +367,9 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
   const currentScanId = ui.scannerState.scanId ?? propsCurrentScanId;
   const scanSettings = ui.scannerState.scanSettings;
   const unknownScanId = ui.scannerState.unknownScanId;
+  
+  // Check if this is PTR scan mode
+  const isPtrScanMode = (scanSettings as { searchMode?: string })?.searchMode === "ptr";
 
   // Check if this is an unknown scan that hasn't been narrowed down yet
   // totalResults === -1 means unknown scan with too many results to display
@@ -379,17 +412,23 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
   const [editDialog, setEditDialog] = useState<{
     open: boolean;
     address: string;
-    currentValue: string;
+    currentValue: string; // Formatted display value
+    rawValue: string; // Raw decimal value for conversions
     valueType: ScanValueType | null;
+    ptrValueType?: Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">; // For ptr type: the underlying value type
     newValue: string;
     inputFormat: "dec" | "hex";
+    bookmarkId?: string; // For updating bookmark type without writing value
   }>({
     open: false,
     address: "",
     currentValue: "",
+    rawValue: "",
     valueType: null,
+    ptrValueType: "int32",
     newValue: "",
     inputFormat: "dec",
+    bookmarkId: undefined,
   });
 
   // Manual bookmark dialog state
@@ -397,6 +436,7 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     open: boolean;
     address: string;
     valueType: ScanValueType;
+    ptrValueType: Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">; // For ptr type: the underlying value type
     size: number;
     description: string;
     displayFormat: "dec" | "hex";
@@ -404,6 +444,7 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     open: false,
     address: "",
     valueType: "int32",
+    ptrValueType: "int32",
     size: 4,
     description: "",
     displayFormat: "dec",
@@ -423,6 +464,13 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     accessType: "rw",
     description: "",
   });
+
+  // PointerMap generation state
+  const [isGeneratingPointerMap, setIsGeneratingPointerMap] = useState(false);
+  const [pointerMapStatus, setPointerMapStatus] = useState<{
+    message: string;
+    type: "info" | "success" | "error";
+  } | null>(null);
 
   // Filter state for Scan Results (persisted in localStorage)
   const [moduleFilter, setModuleFilter] = useLocalStorage<string>(
@@ -462,7 +510,21 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
   const [updatedBookmarkValues, setUpdatedBookmarkValues] = useState<
     Map<string, string>
   >(new Map());
+  const updatedBookmarkValuesRef = useRef<Map<string, string>>(new Map());
   const memoryUpdateInterval = useRef<number | null>(null);
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    updatedBookmarkValuesRef.current = updatedBookmarkValues;
+  }, [updatedBookmarkValues]);
+
+  // Force re-fetch when bookmark ptrValueType changes
+  const bookmarkTypesKey = useMemo(() => {
+    return bookmarks.map(b => `${b.id}:${b.ptrValueType || ''}:${b.type}`).join(',');
+  }, [bookmarks]);
+
+  // Track last update time to avoid too frequent re-renders
+  const lastBookmarkUpdateRef = useRef<number>(0);
 
   // Compute library+offset expressions for all scan results (needed for filtering)
   const addressDetails = useMemo(() => {
@@ -544,12 +606,48 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
       return addressSortOrder === "asc" ? addrA - addrB : addrB - addrA;
     });
   }, [filteredScanResults, addressSortOrder]);
+
+  // Parse PTR scan results to get pointer chains
+  // Each result.value is in format: "module+0x1234 | 0x8 | 0x10"
+  const ptrScanData = useMemo((): { 
+    maxOffsets: number; 
+    parsedResults: Array<{
+      address: string;
+      baseAddress: string;
+      offsets: string[];
+      originalResult: typeof sortedScanResults[0];
+    }>;
+  } => {
+    if (!isPtrScanMode) return { maxOffsets: 0, parsedResults: [] };
+    
+    let maxOffsets = 0;
+    const parsedResults = sortedScanResults.map(result => {
+      const parts = result.value.split(" | ");
+      const baseAddress = parts[0] || "";
+      const offsets = parts.slice(1);
+      maxOffsets = Math.max(maxOffsets, offsets.length);
+      return {
+        address: result.address,
+        baseAddress,
+        offsets,
+        originalResult: result,
+      };
+    });
+    
+    return { maxOffsets, parsedResults };
+  }, [isPtrScanMode, sortedScanResults]);
+
   const bookmarkUpdateInterval = useRef<number | null>(null);
 
   // Virtual scrolling state
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [containerHeight, setContainerHeight] = useState(800); // より大きな初期値
+
+  // PTR virtual scrolling state
+  const ptrContainerRef = useRef<HTMLDivElement>(null);
+  const [ptrScrollTop, setPtrScrollTop] = useState(0);
+  const [ptrContainerHeight, setPtrContainerHeight] = useState(400);
 
   // Bookmark table column widths
   const [bookmarkColumnWidths, setBookmarkColumnWidths] = useState({
@@ -649,9 +747,81 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     handleCloseBookmarkContextMenu();
   }, [bookmarkContextMenu, handleCloseBookmarkContextMenu]);
 
+  // Generate PointerMap for a specific bookmark address
+  const handleGeneratePointerMap = useCallback(async (address: string) => {
+    setIsGeneratingPointerMap(true);
+    setPointerMapStatus({ message: "Generating PointerMap...", type: "info" });
+    
+    try {
+      const api = getApiClient();
+      const pointerMapData = await api.generatePointerMap();
+      
+      // Create default filename with the target address
+      const addressHex = address.replace("0x", "").replace("0X", "").toUpperCase();
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const defaultFilename = `pointermap_${addressHex}_${timestamp}.dptr`;
+      
+      setPointerMapStatus({ message: "Saving file...", type: "info" });
+      
+      // Try to use Tauri save dialog if available
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const dataArray = new Uint8Array(pointerMapData);
+        
+        const savedPath = await invoke<string | null>("save_binary_file_dialog", {
+          title: "Save PointerMap",
+          defaultFilename: defaultFilename,
+          filterName: "PointerMap Files",
+          filterExtensions: ["dptr"],
+          data: Array.from(dataArray),
+        });
+        
+        if (savedPath) {
+          setPointerMapStatus({ message: `Saved to: ${savedPath}`, type: "success" });
+          console.log(`PointerMap saved to: ${savedPath}`);
+        } else {
+          // User cancelled the dialog
+          setPointerMapStatus(null);
+        }
+      } catch (tauriError) {
+        // Fallback to browser download if Tauri is not available
+        console.log("Tauri not available, using browser download");
+        const blob = new Blob([pointerMapData], { type: "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = defaultFilename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        setPointerMapStatus({ message: `Downloaded: ${defaultFilename}`, type: "success" });
+        console.log(`PointerMap saved as ${defaultFilename}`);
+      }
+      
+      // Auto-hide success message after 5 seconds
+      setTimeout(() => {
+        setPointerMapStatus((prev) => 
+          prev?.type === "success" ? null : prev
+        );
+      }, 5000);
+      
+    } catch (error) {
+      console.error("Failed to generate PointerMap:", error);
+      setPointerMapStatus({ 
+        message: `Failed: ${error instanceof Error ? error.message : "Unknown error"}`, 
+        type: "error" 
+      });
+    } finally {
+      setIsGeneratingPointerMap(false);
+    }
+  }, []);
+
   // Calculate visible range for virtual scrolling
   const currentRowHeight = isCompactHeight ? COMPACT_ROW_HEIGHT : ROW_HEIGHT;
-  const itemsPerView = Math.ceil(containerHeight / currentRowHeight);
+  // Ensure at least 10 items are shown even if container height is not calculated yet
+  const itemsPerView = Math.max(10, Math.ceil(containerHeight / currentRowHeight));
   const bufferSize = 2; // Small buffer for smooth scrolling
   const visibleStart = Math.max(
     0,
@@ -779,28 +949,35 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
   const convertArrayBufferToValue = useCallback(
     (buffer: ArrayBuffer, valueType: ScanValueType): string => {
       const view = new DataView(buffer);
+      const byteLength = buffer.byteLength;
+      
+      // Helper to check buffer size and return default if insufficient
+      const checkSize = (requiredBytes: number): boolean => {
+        return byteLength >= requiredBytes;
+      };
+      
       try {
         switch (valueType) {
           case "int8":
-            return view.getInt8(0).toString();
+            return checkSize(1) ? view.getInt8(0).toString() : "0";
           case "uint8":
-            return view.getUint8(0).toString();
+            return checkSize(1) ? view.getUint8(0).toString() : "0";
           case "int16":
-            return view.getInt16(0, true).toString(); // little-endian
+            return checkSize(2) ? view.getInt16(0, true).toString() : "0"; // little-endian
           case "uint16":
-            return view.getUint16(0, true).toString(); // little-endian
+            return checkSize(2) ? view.getUint16(0, true).toString() : "0"; // little-endian
           case "int32":
-            return view.getInt32(0, true).toString();
+            return checkSize(4) ? view.getInt32(0, true).toString() : "0";
           case "uint32":
-            return view.getUint32(0, true).toString(); // little-endian
+            return checkSize(4) ? view.getUint32(0, true).toString() : "0"; // little-endian
           case "int64":
-            return view.getBigInt64(0, true).toString();
+            return checkSize(8) ? view.getBigInt64(0, true).toString() : "0";
           case "uint64":
-            return view.getBigUint64(0, true).toString(); // little-endian
+            return checkSize(8) ? view.getBigUint64(0, true).toString() : "0"; // little-endian
           case "float":
-            return view.getFloat32(0, true).toString();
+            return checkSize(4) ? view.getFloat32(0, true).toString() : "0";
           case "double":
-            return view.getFloat64(0, true).toString();
+            return checkSize(8) ? view.getFloat64(0, true).toString() : "0";
           case "string":
             // Convert buffer to string, handling null termination
             const uint8Array = new Uint8Array(buffer);
@@ -855,6 +1032,44 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     try {
       const updatePromises = bookmarks.map(async (bookmark) => {
         try {
+          // For PTR type, resolve the pointer chain first
+          if (bookmark.type === "ptr") {
+            const api = getApiClient();
+            const resolveResult = await api.resolveAddress(bookmark.address);
+            if (resolveResult.success && resolveResult.data?.address) {
+              const resolvedAddr = `0x${resolveResult.data.address.toString(16).toUpperCase()}`;
+              // Always read 8 bytes for PTR type, mask based on ptrValueType for display
+              const buffer = await onMemoryRead(resolvedAddr, 8);
+              const view = new DataView(buffer);
+              const fullValue = view.getBigUint64(0, true);
+              
+              // Mask based on ptrValueType for display
+              const ptrValueType = bookmark.ptrValueType || "int32";
+              let maskedValue: bigint;
+              switch (ptrValueType) {
+                case "int8":
+                case "uint8":
+                  maskedValue = fullValue & 0xFFn;
+                  break;
+                case "int16":
+                case "uint16":
+                  maskedValue = fullValue & 0xFFFFn;
+                  break;
+                case "int32":
+                case "uint32":
+                case "float":
+                  maskedValue = fullValue & 0xFFFFFFFFn;
+                  break;
+                default:
+                  maskedValue = fullValue;
+              }
+              return { id: bookmark.id, value: maskedValue.toString() };
+            }
+            // Resolve failed - keep previous value or use stored value
+            const previousValue = updatedBookmarkValuesRef.current.get(bookmark.id);
+            return { id: bookmark.id, value: previousValue || bookmark.value };
+          }
+          
           const size = getDataTypeSize(
             bookmark.type,
             bookmark.value,
@@ -862,25 +1077,27 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
           );
           const buffer = await onMemoryRead(bookmark.address, size);
           const newValue = convertArrayBufferToValue(buffer, bookmark.type);
-          return { address: bookmark.address, value: newValue };
+          return { id: bookmark.id, value: newValue };
         } catch (error) {
           // Memory read failed, keep old value
-          return { address: bookmark.address, value: bookmark.value };
+          const previousValue = updatedBookmarkValuesRef.current.get(bookmark.id);
+          return { id: bookmark.id, value: previousValue || bookmark.value };
         }
       });
 
       const updates = await Promise.all(updatePromises);
       const newUpdatedValues = new Map<string, string>();
 
-      updates.forEach(({ address, value }) => {
-        newUpdatedValues.set(address, String(value));
+      updates.forEach(({ id, value }) => {
+        newUpdatedValues.set(id, String(value));
       });
 
       setUpdatedBookmarkValues(newUpdatedValues);
     } catch (error) {
       console.error("Failed to update bookmark memory values:", error);
     }
-  }, [onMemoryRead, bookmarks, getDataTypeSize, convertArrayBufferToValue]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onMemoryRead, bookmarks, getDataTypeSize, convertArrayBufferToValue, bookmarkTypesKey]);
 
   // Function to update memory values for visible results
   const updateMemoryValues = useCallback(async () => {
@@ -970,6 +1187,18 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     }
   }, [activeTab, onMemoryRead, bookmarks.length, updateBookmarkMemoryValues]);
 
+  // Trigger immediate update when bookmark types change
+  useEffect(() => {
+    if (activeTab === 1 && onMemoryRead && bookmarks.length > 0) {
+      // Immediate update - don't wait for interval
+      const now = Date.now();
+      if (now - lastBookmarkUpdateRef.current > 100) {
+        lastBookmarkUpdateRef.current = now;
+        updateBookmarkMemoryValues();
+      }
+    }
+  }, [activeTab, onMemoryRead, bookmarks, bookmarkTypesKey, updateBookmarkMemoryValues]);
+
   // Debug watchpoint dialog state changes
   useEffect(() => {
     console.log("Watchpoint dialog state changed:", watchpointDialog);
@@ -1015,6 +1244,20 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
       resizeObserver.observe(containerRef.current);
     }
 
+    // PTR container ResizeObserver
+    let ptrResizeObserver: ResizeObserver | null = null;
+    if (ptrContainerRef.current && window.ResizeObserver) {
+      ptrResizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const height = entry.contentRect.height;
+          if (height > 0) {
+            setPtrContainerHeight(height);
+          }
+        }
+      });
+      ptrResizeObserver.observe(ptrContainerRef.current);
+    }
+
     const handleResize = () => {
       setTimeout(updateHeight, 100);
     };
@@ -1027,6 +1270,9 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
       window.removeEventListener("resize", handleResize);
       if (resizeObserver) {
         resizeObserver.disconnect();
+      }
+      if (ptrResizeObserver) {
+        ptrResizeObserver.disconnect();
       }
     };
   }, [isCompactHeight, scanResults.length]); // scanResults.lengthも依存関係に追加
@@ -1105,9 +1351,11 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
           open: true,
           address,
           currentValue,
+          rawValue: currentValue, // For scan results, raw value is the same as current value (decimal)
           valueType: result.type,
           newValue: currentValue,
           inputFormat: scanSettings?.valueInputFormat || "dec",
+          bookmarkId: undefined, // Scan results don't have bookmark ID
         });
       }
       handleContextMenuClose();
@@ -1122,10 +1370,15 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
   const handleEditDialogSave = useCallback(async () => {
     if (editDialog.valueType) {
       try {
+        // For ptr type, we need to use the ptrValueType for the actual edit
+        const effectiveValueType = editDialog.valueType === "ptr" 
+          ? (editDialog.ptrValueType || "int32") 
+          : editDialog.valueType;
+        
         await onResultEdit(
           editDialog.address,
           editDialog.newValue,
-          editDialog.valueType,
+          effectiveValueType,
           editDialog.inputFormat
         );
         handleEditDialogClose();
@@ -1141,6 +1394,7 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
       open: true,
       address: "",
       valueType: "int32",
+      ptrValueType: "int32",
       size: 4,
       description: "",
       displayFormat: scanSettings?.valueInputFormat || "dec",
@@ -1155,10 +1409,123 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
     if (onAddManualBookmark && manualBookmarkDialog.address) {
       try {
         const trimmedAddress = manualBookmarkDialog.address.trim();
+        
+        console.log("[Bookmark] Adding bookmark with address:", trimmedAddress);
+        console.log("[Bookmark] Value type:", manualBookmarkDialog.valueType);
+
+        // Check if the input looks like a pointer expression (arrow format or nested brackets)
+        const isArrowFormat = trimmedAddress.includes("→") || trimmedAddress.includes("->");
+        const isNestedBracket = trimmedAddress.includes("[[") || (trimmedAddress.startsWith("[") && trimmedAddress.includes("]+"));
+        const looksLikePointerExpression = isArrowFormat || isNestedBracket;
+
+        // If user didn't select ptr type but input looks like pointer expression, auto-detect
+        if (looksLikePointerExpression && manualBookmarkDialog.valueType !== "ptr") {
+          console.log("[Bookmark] Auto-detected pointer expression, switching to ptr type");
+          // Handle as ptr type
+        }
+
+        // For PTR type OR detected pointer expression, handle pointer expression format
+        if (manualBookmarkDialog.valueType === "ptr" || looksLikePointerExpression) {
+          console.log("[Bookmark] Detected pointer expression type");
+          console.log("[Bookmark] Ptr value type:", manualBookmarkDialog.ptrValueType);
+          console.log("[Bookmark] Display format:", manualBookmarkDialog.displayFormat);
+          
+          // Convert nested format [[base]+0x10]+0x18 to arrow format: base → [0x10] → [0x18]
+          let pointerExpression = trimmedAddress;
+          
+          // Normalize various arrow formats to " → " (with spaces)
+          // First, replace -> with →
+          pointerExpression = pointerExpression.replace(/->/g, "→");
+          // Then normalize spacing around → (remove existing spaces and add consistent ones)
+          pointerExpression = pointerExpression.replace(/\s*→\s*/g, " → ");
+          
+          // Check if it's in nested bracket format [[...]] and convert to arrow format
+          if (pointerExpression.includes("[[") || (pointerExpression.startsWith("[") && pointerExpression.includes("]+"))) {
+            // Convert [[base+0x10]+0x18]+0x20 to base+0x10 → [0x18] → [0x20]
+            // First, extract the innermost base and offsets
+            const convertNestedToArrow = (expr: string): string => {
+              // Remove outer whitespace
+              expr = expr.trim();
+              
+              // Pattern to match nested pointer format
+              // Example: [[Tutorial-x86_64.exe+0x34ECA0]+0x10]+0x18
+              const parts: string[] = [];
+              let current = expr;
+              
+              // Extract each level from outside in
+              while (current.startsWith("[")) {
+                // Find the matching closing bracket and offset
+                let depth = 0;
+                let closingIndex = -1;
+                for (let i = 0; i < current.length; i++) {
+                  if (current[i] === "[") depth++;
+                  else if (current[i] === "]") {
+                    depth--;
+                    if (depth === 0) {
+                      closingIndex = i;
+                      break;
+                    }
+                  }
+                }
+                
+                if (closingIndex === -1) break;
+                
+                // Get the offset after the closing bracket
+                const after = current.slice(closingIndex + 1);
+                const offsetMatch = after.match(/^([+\-]0x[0-9A-Fa-f]+|\+[0-9]+)/i);
+                if (offsetMatch) {
+                  parts.unshift(offsetMatch[1]);
+                }
+                
+                // Continue with inner content
+                current = current.slice(1, closingIndex);
+              }
+              
+              // The remaining current is the base
+              if (current) {
+                parts.unshift(current);
+              }
+              
+              // Build arrow format: base → [offset1] → [offset2]
+              if (parts.length === 0) return expr;
+              let result = parts[0];
+              for (let i = 1; i < parts.length; i++) {
+                result += ` → [${parts[i]}]`;
+              }
+              return result;
+            };
+            
+            pointerExpression = convertNestedToArrow(pointerExpression);
+            console.log("[Bookmark] Converted to arrow format:", pointerExpression);
+          }
+          
+          // Normalize case in the pointer expression (uppercase hex values)
+          pointerExpression = pointerExpression.replace(/0x([0-9a-f]+)/gi, (_, hex) => `0x${hex.toUpperCase()}`);
+          
+          const success = await onAddManualBookmark(
+            pointerExpression,
+            "ptr",
+            manualBookmarkDialog.description || "Pointer chain",
+            undefined, // no library expression for ptr
+            undefined, // no size for ptr
+            manualBookmarkDialog.displayFormat,
+            manualBookmarkDialog.ptrValueType
+          );
+
+          console.log("[Bookmark] Add result:", success);
+
+          if (success) {
+            handleManualBookmarkDialogClose();
+          } else {
+            alert("Failed to add bookmark. Address may already be bookmarked.");
+          }
+          return;
+        }
+
+        // Non-ptr type handling (original logic)
         let normalizedAddress: string | null;
         let libraryExpression: string | undefined;
 
-        console.log("[Bookmark] Adding bookmark with address:", trimmedAddress);
         console.log(
           "[Bookmark] Attached modules count:",
           attachedModules?.length || 0
@@ -1227,7 +1594,8 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
           manualBookmarkDialog.description || undefined,
           libraryExpression,
           size,
-          manualBookmarkDialog.displayFormat
+          manualBookmarkDialog.displayFormat,
+          undefined // no ptrValueType for non-ptr types
         );
 
         console.log("[Bookmark] Add result:", success);
@@ -1865,7 +2233,274 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                   />
                 </Box>
 
-                {/* Virtual Results Table */}
+                {/* Virtual Results Table - PTR mode has different structure */}
+                {isPtrScanMode ? (
+                  /* PTR Scan Results Table - shows pointer chains */
+                  <Box
+                    sx={{
+                      flex: 1,
+                      display: "flex",
+                      flexDirection: "column",
+                      height: "100%",
+                      overflow: "hidden",
+                    }}
+                  >
+                    {/* PTR Table Header */}
+                    <Box
+                      sx={{
+                        backgroundColor: "#080808",
+                        borderBottom: `2px solid ${borderColors.main}`,
+                        display: "flex",
+                        alignItems: "center",
+                        height: isCompactHeight
+                          ? COMPACT_HEADER_HEIGHT
+                          : HEADER_HEIGHT,
+                        px: isCompactHeight ? 1 : 2,
+                        overflowX: "auto",
+                      }}
+                    >
+                      {/* Base Address Column */}
+                      <Box
+                        sx={{
+                          width: "auto",
+                          minWidth: "150px",
+                          maxWidth: "300px",
+                          fontWeight: 600,
+                          color: "text.primary",
+                          fontSize: isCompactHeight ? "11px" : "13px",
+                          px: 1,
+                        }}
+                      >
+                        Base Address
+                      </Box>
+                      {/* Offset Columns - dynamically generated based on max chain length */}
+                      {Array.from({ length: ptrScanData.maxOffsets }, (_, i) => (
+                        <Box
+                          key={`offset-header-${i}`}
+                          sx={{
+                            width: "auto",
+                            minWidth: "70px",
+                            maxWidth: "120px",
+                            fontWeight: 600,
+                            color: "text.primary",
+                            fontSize: isCompactHeight ? "11px" : "13px",
+                            px: 1,
+                            borderLeft: "1px solid #333",
+                          }}
+                        >
+                          Offset {i}
+                        </Box>
+                      ))}
+                      {/* Actions Column */}
+                      <Box
+                        sx={{
+                          width: "48px",
+                          fontWeight: 600,
+                          color: "text.primary",
+                          fontSize: isCompactHeight ? "11px" : "13px",
+                          textAlign: "center",
+                          marginLeft: "auto",
+                        }}
+                      >
+                        Actions
+                      </Box>
+                    </Box>
+
+                    {/* PTR Table Body - Manual Virtual Scrolling */}
+                    <Box
+                      ref={ptrContainerRef}
+                      sx={{
+                        flex: 1,
+                        overflow: "auto",
+                        position: "relative",
+                        minHeight: 200,
+                        maxHeight: "calc(100vh - 300px)",
+                        height: "100%",
+                        "&::-webkit-scrollbar": {
+                          width: "14px",
+                          backgroundColor: "#1e1e1e",
+                        },
+                        "&::-webkit-scrollbar-track": {
+                          background: "#1e1e1e",
+                          borderRadius: "7px",
+                          border: "1px solid #333",
+                        },
+                        "&::-webkit-scrollbar-thumb": {
+                          background: "#555",
+                          borderRadius: "7px",
+                          border: "2px solid #1e1e1e",
+                          backgroundClip: "content-box",
+                          minHeight: "30px",
+                          "&:hover": {
+                            background: "#777",
+                          },
+                          "&:active": {
+                            background: "#999",
+                          },
+                        },
+                        scrollbarWidth: "auto",
+                        scrollbarColor: "#555 #1e1e1e",
+                      }}
+                      onScroll={(e) => {
+                        const target = e.target as HTMLDivElement;
+                        setPtrScrollTop(target.scrollTop);
+                      }}
+                    >
+                      {(() => {
+                        const ptrRowHeight = isCompactHeight ? 24 : 32;
+                        // Ensure at least 10 items are shown even if container height is not calculated yet
+                        const ptrItemsPerView = Math.max(10, Math.ceil(ptrContainerHeight / ptrRowHeight));
+                        const ptrBufferSize = 5;
+                        const ptrVisibleStart = Math.max(
+                          0,
+                          Math.floor(ptrScrollTop / ptrRowHeight) - ptrBufferSize
+                        );
+                        const ptrVisibleEnd = Math.min(
+                          ptrVisibleStart + ptrItemsPerView + ptrBufferSize * 2,
+                          ptrScanData.parsedResults.length
+                        );
+                        const ptrVisibleResults = ptrScanData.parsedResults.slice(ptrVisibleStart, ptrVisibleEnd);
+
+                        return (
+                          <>
+                            {/* Total height container for proper scrollbar */}
+                            <Box
+                              sx={{
+                                height: ptrScanData.parsedResults.length * ptrRowHeight,
+                                position: "relative",
+                                width: "100%",
+                              }}
+                            >
+                              {/* Visible items positioned absolutely */}
+                              <Box
+                                sx={{
+                                  position: "absolute",
+                                  top: ptrVisibleStart * ptrRowHeight,
+                                  left: 0,
+                                  right: 0,
+                                  width: "100%",
+                                }}
+                              >
+                                {ptrVisibleResults.map((item, index) => {
+                                  const actualIndex = ptrVisibleStart + index;
+                                  const buildExpression = () => {
+                                    const offsets = item.offsets.filter((o: string) => o);
+                                    let expr = item.baseAddress;
+                                    for (const offset of offsets) {
+                                      expr += ` → [${offset}]`;
+                                    }
+                                    return expr;
+                                  };
+
+                                  return (
+                                    <Box
+                                      key={`ptr-result-${actualIndex}`}
+                                      sx={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        height: ptrRowHeight,
+                                        px: isCompactHeight ? 1 : 2,
+                                        borderBottom: "1px solid",
+                                        borderColor: "divider",
+                                        backgroundColor: selectedRows.has(item.address)
+                                          ? "action.selected"
+                                          : actualIndex % 2 === 0
+                                            ? "#2a2a2a"
+                                            : "#1e1e1e",
+                                        "&:hover": {
+                                          backgroundColor: "action.hover",
+                                        },
+                                        cursor: "pointer",
+                                      }}
+                                      onClick={(event) =>
+                                        handleRowClick(item.address, event)
+                                      }
+                                      onContextMenu={(event) => {
+                                        event.preventDefault();
+                                        setContextMenu({
+                                          mouseX: event.clientX,
+                                          mouseY: event.clientY,
+                                          address: buildExpression(),
+                                        });
+                                      }}
+                                    >
+                                      {/* Base Address */}
+                                      <Box
+                                        sx={{
+                                          width: "auto",
+                                          minWidth: "150px",
+                                          maxWidth: "300px",
+                                          fontFamily: "monospace",
+                                          fontSize: isCompactHeight ? "10px" : "11px",
+                                          fontWeight: 500,
+                                          color: "#4fc1ff",
+                                          px: 1,
+                                          overflow: "hidden",
+                                          textOverflow: "ellipsis",
+                                          whiteSpace: "nowrap",
+                                        }}
+                                        title={item.baseAddress}
+                                      >
+                                        {item.baseAddress}
+                                      </Box>
+                                      {/* Offset Values */}
+                                      {Array.from({ length: ptrScanData.maxOffsets }, (_, i) => (
+                                        <Box
+                                          key={`offset-${i}`}
+                                          sx={{
+                                            width: "auto",
+                                            minWidth: "70px",
+                                            maxWidth: "120px",
+                                            fontFamily: "monospace",
+                                            fontSize: isCompactHeight ? "10px" : "11px",
+                                            fontWeight: 500,
+                                            color: "#ce9178",
+                                            px: 1,
+                                            borderLeft: "1px solid #333",
+                                          }}
+                                        >
+                                          {item.offsets[i] || "-"}
+                                        </Box>
+                                      ))}
+                                      {/* Action Menu */}
+                                      <Box
+                                        sx={{
+                                          width: "48px",
+                                          display: "flex",
+                                          justifyContent: "center",
+                                          marginLeft: "auto",
+                                        }}
+                                      >
+                                        <IconButton
+                                          size="small"
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            setContextMenu({
+                                              mouseX: event.clientX,
+                                              mouseY: event.clientY,
+                                              address: buildExpression(),
+                                            });
+                                          }}
+                                        >
+                                          <MoreVert
+                                            sx={{
+                                              fontSize: isCompactHeight ? "14px" : "20px",
+                                            }}
+                                          />
+                                        </IconButton>
+                                      </Box>
+                                    </Box>
+                                  );
+                                })}
+                              </Box>
+                            </Box>
+                          </>
+                        );
+                      })()}
+                    </Box>
+                  </Box>
+                ) : (
+                /* Normal Results Table */
                 <Box
                   sx={{
                     flex: 1,
@@ -2299,11 +2934,13 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                                         open: true,
                                         address: result.address,
                                         currentValue: formatValue(result),
+                                        rawValue: String(result.value), // Raw decimal value
                                         newValue: formatValue(result),
                                         valueType: result.type,
                                         inputFormat:
                                           scanSettings?.valueInputFormat ||
                                           "dec",
+                                        bookmarkId: undefined, // Scan results don't have bookmark ID
                                       });
                                     }}
                                   >
@@ -2356,6 +2993,7 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                     </Box>
                   </Box>
                 </Box>
+                )}
               </>
             )}
           </TabContent>
@@ -2427,7 +3065,7 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                     >
                       Bookmarks
                     </Typography>
-                    <Stack direction="row" spacing={2} alignItems="center">
+                    <Stack direction="row" spacing={1} alignItems="center">
                       <Typography
                         variant="body2"
                         color="text.secondary"
@@ -2438,6 +3076,70 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                         {bookmarks.length} bookmark
                         {bookmarks.length !== 1 ? "s" : ""}
                       </Typography>
+                      {/* PointerMap Generation Status */}
+                      {(isGeneratingPointerMap || pointerMapStatus) && (
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 1,
+                            px: 1.5,
+                            py: 0.5,
+                            borderRadius: 1,
+                            backgroundColor: pointerMapStatus?.type === "error" 
+                              ? "error.dark" 
+                              : pointerMapStatus?.type === "success"
+                              ? "success.dark"
+                              : "info.dark",
+                            opacity: 0.9,
+                          }}
+                        >
+                          {isGeneratingPointerMap && (
+                            <Box
+                              sx={{
+                                width: 14,
+                                height: 14,
+                                border: "2px solid",
+                                borderColor: "transparent",
+                                borderTopColor: "white",
+                                borderRadius: "50%",
+                                animation: "spin 1s linear infinite",
+                                "@keyframes spin": {
+                                  "0%": { transform: "rotate(0deg)" },
+                                  "100%": { transform: "rotate(360deg)" },
+                                },
+                              }}
+                            />
+                          )}
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              fontSize: isCompactHeight ? "10px" : "12px",
+                              color: "white",
+                              maxWidth: 300,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {pointerMapStatus?.message || "Processing..."}
+                          </Typography>
+                          {pointerMapStatus && !isGeneratingPointerMap && (
+                            <IconButton
+                              size="small"
+                              onClick={() => setPointerMapStatus(null)}
+                              sx={{ 
+                                p: 0, 
+                                minWidth: 16, 
+                                color: "white",
+                                "&:hover": { opacity: 0.8 },
+                              }}
+                            >
+                              ×
+                            </IconButton>
+                          )}
+                        </Box>
+                      )}
                       <Button
                         size="small"
                         startIcon={<AddIcon />}
@@ -2581,10 +3283,14 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                     <TableBody>
                       {bookmarks.map((bookmark) => {
                         const currentValue =
-                          updatedBookmarkValues.get(bookmark.address) ||
+                          updatedBookmarkValues.get(bookmark.id) ||
                           bookmark.value;
 
                         // Format value based on bookmark's displayFormat
+                        // For ptr type, use ptrValueType; otherwise use bookmark.type
+                        const effectiveType = bookmark.type === "ptr" 
+                          ? (bookmark.ptrValueType || "int32") 
+                          : bookmark.type;
                         const isIntegerType = [
                           "int8",
                           "uint8",
@@ -2594,12 +3300,12 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                           "uint32",
                           "int64",
                           "uint64",
-                        ].includes(bookmark.type);
+                        ].includes(effectiveType);
                         let displayValue = currentValue;
                         if (isIntegerType && bookmark.displayFormat === "hex") {
                           try {
                             const numValue = ["int64", "uint64"].includes(
-                              bookmark.type
+                              effectiveType
                             )
                               ? BigInt(currentValue)
                               : parseInt(currentValue, 10);
@@ -2617,12 +3323,12 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                             } else {
                               if (numValue < 0) {
                                 // Two's complement based on type using bitwise AND with proper mask
-                                if (bookmark.type === "int8") {
+                                if (effectiveType === "int8") {
                                   hexStr = ((numValue & 0xff) >>> 0)
                                     .toString(16)
                                     .toUpperCase()
                                     .padStart(2, "0");
-                                } else if (bookmark.type === "int16") {
+                                } else if (effectiveType === "int16") {
                                   hexStr = ((numValue & 0xffff) >>> 0)
                                     .toString(16)
                                     .toUpperCase()
@@ -2668,7 +3374,44 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                                 maxWidth: bookmarkColumnWidths.address,
                               }}
                             >
-                              {bookmark.libraryExpression ? (
+                              {/* PTR type: show structured pointer chain with colored arrows */}
+                              {bookmark.type === "ptr" ? (
+                                <Box
+                                  sx={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    flexWrap: "wrap",
+                                    gap: 0.5,
+                                    fontFamily: "monospace",
+                                    fontSize: isCompactHeight ? "10px" : "11px",
+                                  }}
+                                >
+                                  {(() => {
+                                    // Parse pointer expression: "base → [0x10] → [0x18]"
+                                    const parts = bookmark.address.split(" → ");
+                                    return parts.map((part, idx) => (
+                                      <Box key={idx} component="span" sx={{ display: "flex", alignItems: "center" }}>
+                                        {idx > 0 && (
+                                          <Box component="span" sx={{ color: "#ffcc00", mx: 0.5, fontWeight: 600 }}>→</Box>
+                                        )}
+                                        {idx === 0 ? (
+                                          <Box component="span" sx={{ color: "#4fc1ff" }}>
+                                            {part.replace(/0X/g, '0x')}
+                                          </Box>
+                                        ) : (
+                                          <>
+                                            <Box component="span" sx={{ color: "#888" }}>[</Box>
+                                            <Box component="span" sx={{ color: "#ce9178" }}>
+                                              {part.replace(/[\[\]]/g, '').replace(/0X/g, '0x')}
+                                            </Box>
+                                            <Box component="span" sx={{ color: "#888" }}>]</Box>
+                                          </>
+                                        )}
+                                      </Box>
+                                    ));
+                                  })()}
+                                </Box>
+                              ) : bookmark.libraryExpression ? (
                                 <>
                                   <Typography
                                     sx={{
@@ -2731,7 +3474,9 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                                   display: "inline-block",
                                 }}
                               >
-                                {bookmark.type}
+                                {bookmark.type === "ptr" 
+                                  ? `ptr ${bookmark.ptrValueType || "int32"}` 
+                                  : bookmark.type}
                               </Typography>
                             </TableCell>
                             {/* Value */}
@@ -2790,19 +3535,44 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                                 <IconButton
                                   size="small"
                                   onClick={() => {
+                                    // currentValue is raw decimal from memory, displayValue is formatted
+                                    // Ensure rawValue is always stored as decimal string for conversions
+                                    let rawDecimalValue = currentValue;
+                                    // If currentValue looks like hex, convert to decimal
+                                    if (typeof currentValue === "string" && currentValue.toLowerCase().startsWith("0x")) {
+                                      try {
+                                        rawDecimalValue = BigInt(currentValue).toString();
+                                      } catch {
+                                        rawDecimalValue = currentValue;
+                                      }
+                                    }
                                     setEditDialog({
                                       open: true,
                                       address: bookmark.address,
                                       currentValue: displayValue,
+                                      rawValue: rawDecimalValue, // Raw decimal value from memory
                                       valueType: bookmark.type,
+                                      ptrValueType: bookmark.ptrValueType || "int32",
                                       newValue: displayValue,
                                       inputFormat:
                                         bookmark.displayFormat || "dec",
+                                      bookmarkId: bookmark.id,
                                     });
                                   }}
                                   title="Edit Value"
                                 >
                                   <Edit sx={{ fontSize: "16px" }} />
+                                </IconButton>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => handleGeneratePointerMap(bookmark.address)}
+                                  disabled={isGeneratingPointerMap}
+                                  title={isGeneratingPointerMap ? "Generating PointerMap..." : "Generate PointerMap for this address"}
+                                  sx={{
+                                    color: isGeneratingPointerMap ? "info.main" : "text.secondary",
+                                  }}
+                                >
+                                  <MapIcon sx={{ fontSize: "16px" }} />
                                 </IconButton>
                                 <IconButton
                                   size="small"
@@ -3106,6 +3876,8 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
               : undefined
           }
         >
+          {/* Edit Value - hide for PTR scan mode */}
+          {!isPtrScanMode && (
           <MenuItem
             onClick={() =>
               contextMenu &&
@@ -3120,20 +3892,34 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
             <Edit sx={{ mr: 1 }} />
             Edit Value
           </MenuItem>
+          )}
           <MenuItem
             onClick={() => {
               if (contextMenu) {
-                const isBookmarked =
-                  isAddressBookmarked?.(contextMenu.address) || false;
-                onResultBookmark(contextMenu.address, !isBookmarked);
+                // For PTR scan, add the pointer expression as address
+                // The address field contains the pointer expression like [[base]+0x8]+0x10
+                if (isPtrScanMode) {
+                  // Add as a manual bookmark with pointer expression
+                  onAddManualBookmark?.(
+                    contextMenu.address,
+                    "ptr" as ScanValueType,
+                    "Pointer chain"
+                  );
+                } else {
+                  const isBookmarked =
+                    isAddressBookmarked?.(contextMenu.address) || false;
+                  onResultBookmark(contextMenu.address, !isBookmarked);
+                }
                 handleContextMenuClose();
               }
             }}
           >
             <Bookmark sx={{ mr: 1 }} />
-            {isAddressBookmarked?.(contextMenu?.address || "")
-              ? "Remove from Bookmarks"
-              : "Add to Bookmarks"}
+            {isPtrScanMode
+              ? "Add to Bookmarks"
+              : isAddressBookmarked?.(contextMenu?.address || "")
+                ? "Remove from Bookmarks"
+                : "Add to Bookmarks"}
           </MenuItem>
           {/*<MenuItem
           onClick={() => {
@@ -3190,88 +3976,285 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
         >
           <DialogTitle>Edit Memory Value</DialogTitle>
           <DialogContent>
-            <Stack spacing={2} sx={{ mt: 1 }}>
-              <Typography variant="body2" color="text.secondary">
-                Address: {editDialog.address}
+            <Stack spacing={1.5} sx={{ mt: 1 }}>
+              {/* Info Section */}
+              <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+                <Typography variant="body2" color="text.secondary">
+                  Address: <code style={{ fontFamily: "monospace" }}>{editDialog.address}</code>
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Mode: {editDialog.valueType === "ptr" ? "Pointer Chain" : "Direct"}
+                </Typography>
+              </Box>
+              
+              {/* Setting Section */}
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, color: "primary.main", mt: 0.5 }}>
+                Setting
               </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Type: {editDialog.valueType}
-              </Typography>
-              <TextField
-                fullWidth
-                label="New Value"
-                value={editDialog.newValue}
-                onChange={(e) =>
-                  setEditDialog((prev) => ({
-                    ...prev,
-                    newValue: e.target.value,
-                  }))
-                }
-                placeholder={
-                  editDialog.valueType &&
-                  [
-                    "int8",
-                    "uint8",
-                    "int16",
-                    "uint16",
-                    "int32",
-                    "uint32",
-                    "int64",
-                    "uint64",
-                  ].includes(editDialog.valueType)
-                    ? editDialog.inputFormat === "hex"
-                      ? "0x1A2B or 1A2B"
-                      : "Enter decimal value..."
-                    : "Enter value..."
-                }
-                autoFocus
-                sx={{
-                  "& .MuiInputBase-input": {
-                    fontFamily: "monospace",
-                  },
-                }}
-              />
-              {/* Hex/Dec toggle for integer types */}
-              {editDialog.valueType &&
-                [
-                  "int8",
-                  "uint8",
-                  "int16",
-                  "uint16",
-                  "int32",
-                  "uint32",
-                  "int64",
-                  "uint64",
-                ].includes(editDialog.valueType) && (
-                  <RadioGroup
-                    row
-                    value={editDialog.inputFormat}
-                    onChange={(e) =>
+              
+              {/* Value Type Row */}
+              <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                <InputLabel sx={{ minWidth: 90, fontSize: "0.875rem" }}>Value Type</InputLabel>
+                <Select
+                  size="small"
+                  sx={{ flex: 1 }}
+                  value={editDialog.valueType === "ptr" ? (editDialog.ptrValueType || "int32") : (editDialog.valueType || "int32")}
+                  onChange={(e) => {
+                    const newType = e.target.value as ScanValueType;
+                    const integerTypes = ["int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64"];
+                    
+                    // Get type size info for masking
+                    const getTypeMask = (type: string): { mask: bigint; signed: boolean } => {
+                      switch (type) {
+                        case "int8": return { mask: 0xFFn, signed: true };
+                        case "uint8": return { mask: 0xFFn, signed: false };
+                        case "int16": return { mask: 0xFFFFn, signed: true };
+                        case "uint16": return { mask: 0xFFFFn, signed: false };
+                        case "int32": return { mask: 0xFFFFFFFFn, signed: true };
+                        case "uint32": return { mask: 0xFFFFFFFFn, signed: false };
+                        case "int64": return { mask: 0xFFFFFFFFFFFFFFFFn, signed: true };
+                        case "uint64": return { mask: 0xFFFFFFFFFFFFFFFFn, signed: false };
+                        default: return { mask: 0xFFFFFFFFn, signed: true };
+                      }
+                    };
+                    
+                    let convertedValue = editDialog.currentValue;
+                    if (integerTypes.includes(newType) && editDialog.rawValue) {
+                      try {
+                        // Parse the raw value and mask to new type's size
+                        let numValue = BigInt(editDialog.rawValue);
+                        const { mask } = getTypeMask(newType);
+                        numValue = numValue & mask;
+                        
+                        // Re-format in current display format
+                        if (editDialog.inputFormat === "hex") {
+                          convertedValue = "0x" + numValue.toString(16).toUpperCase();
+                        } else {
+                          convertedValue = numValue.toString();
+                        }
+                      } catch {
+                        // Keep original value if conversion fails
+                      }
+                    }
+                    
+                    if (editDialog.valueType === "ptr") {
                       setEditDialog((prev) => ({
                         ...prev,
-                        inputFormat: e.target.value as "dec" | "hex",
-                      }))
+                        ptrValueType: newType as Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">,
+                        newValue: convertedValue,
+                      }));
+                    } else {
+                      setEditDialog((prev) => ({
+                        ...prev,
+                        valueType: newType,
+                        newValue: convertedValue,
+                      }));
                     }
-                  >
-                    <FormControlLabel
-                      value="dec"
-                      control={<Radio size="small" />}
-                      label="Decimal"
-                    />
-                    <FormControlLabel
-                      value="hex"
-                      control={<Radio size="small" />}
-                      label="Hexadecimal"
-                    />
-                  </RadioGroup>
-                )}
+                  }}
+                >
+                  <MenuItem value="int8">int8</MenuItem>
+                  <MenuItem value="uint8">uint8</MenuItem>
+                  <MenuItem value="int16">int16</MenuItem>
+                  <MenuItem value="uint16">uint16</MenuItem>
+                  <MenuItem value="int32">int32</MenuItem>
+                  <MenuItem value="uint32">uint32</MenuItem>
+                  <MenuItem value="int64">int64</MenuItem>
+                  <MenuItem value="uint64">uint64</MenuItem>
+                  <MenuItem value="float">float</MenuItem>
+                  <MenuItem value="double">double</MenuItem>
+                  {editDialog.valueType !== "ptr" && (
+                    <>
+                      <MenuItem value="string">string</MenuItem>
+                      <MenuItem value="bytes">bytes</MenuItem>
+                    </>
+                  )}
+                </Select>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => {
+                    if (editDialog.bookmarkId && onUpdateBookmark) {
+                      const effectiveValueType = editDialog.valueType === "ptr"
+                        ? (editDialog.ptrValueType || "int32")
+                        : editDialog.valueType;
+                      
+                      if (editDialog.valueType === "ptr") {
+                        onUpdateBookmark(editDialog.bookmarkId, {
+                          ptrValueType: effectiveValueType as Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">,
+                        });
+                      } else {
+                        onUpdateBookmark(editDialog.bookmarkId, {
+                          type: (editDialog.valueType || "int32") as ScanValueType,
+                        });
+                      }
+                      const btn = document.activeElement as HTMLButtonElement;
+                      if (btn) {
+                        const originalText = btn.innerText;
+                        btn.innerText = "✓";
+                        btn.style.color = "#4caf50";
+                        btn.style.borderColor = "#4caf50";
+                        setTimeout(() => {
+                          btn.innerText = originalText;
+                          btn.style.color = "";
+                          btn.style.borderColor = "";
+                        }, 1500);
+                      }
+                    }
+                  }}
+                  disabled={!editDialog.bookmarkId || !onUpdateBookmark}
+                  sx={{ minWidth: 60 }}
+                >
+                  Apply
+                </Button>
+              </Box>
+              
+              {/* Display Format Row */}
+              {(() => {
+                if (!editDialog.valueType) return null;
+                const integerTypes = ["int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64"];
+                if (editDialog.valueType === "ptr") {
+                  const ptrType = editDialog.ptrValueType || "int32";
+                  if (!integerTypes.includes(ptrType)) return null;
+                } else if (!integerTypes.includes(editDialog.valueType)) {
+                  return null;
+                }
+                return (
+                  <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                    <InputLabel sx={{ minWidth: 90, fontSize: "0.875rem" }}>Format</InputLabel>
+                    <RadioGroup
+                      row
+                      value={editDialog.inputFormat}
+                      onChange={(e) => {
+                        const newFormat = e.target.value as "dec" | "hex";
+                        
+                        // Get current type for masking
+                        const currentType = editDialog.valueType === "ptr" 
+                          ? (editDialog.ptrValueType || "int32") 
+                          : editDialog.valueType;
+                        const getTypeMask = (type: string): bigint => {
+                          switch (type) {
+                            case "int8": case "uint8": return 0xFFn;
+                            case "int16": case "uint16": return 0xFFFFn;
+                            case "int32": case "uint32": return 0xFFFFFFFFn;
+                            case "int64": case "uint64": return 0xFFFFFFFFFFFFFFFFn;
+                            default: return 0xFFFFFFFFn;
+                          }
+                        };
+                        
+                        let convertedValue = editDialog.rawValue || editDialog.currentValue;
+                        if (editDialog.rawValue) {
+                          try {
+                            let numValue = BigInt(editDialog.rawValue);
+                            numValue = numValue & getTypeMask(currentType || "int32");
+                            if (newFormat === "hex") {
+                              convertedValue = "0x" + numValue.toString(16).toUpperCase();
+                            } else {
+                              convertedValue = numValue.toString();
+                            }
+                          } catch {
+                            // Keep original value if conversion fails
+                          }
+                        }
+                        setEditDialog((prev) => ({
+                          ...prev,
+                          inputFormat: newFormat,
+                          newValue: convertedValue,
+                        }));
+                      }}
+                      sx={{ flex: 1 }}
+                    >
+                      <FormControlLabel
+                        value="dec"
+                        control={<Radio size="small" />}
+                        label="Dec"
+                      />
+                      <FormControlLabel
+                        value="hex"
+                        control={<Radio size="small" />}
+                        label="Hex"
+                      />
+                    </RadioGroup>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => {
+                        if (editDialog.bookmarkId && onUpdateBookmark) {
+                          onUpdateBookmark(editDialog.bookmarkId, {
+                            displayFormat: editDialog.inputFormat,
+                          });
+                          const btn = document.activeElement as HTMLButtonElement;
+                          if (btn) {
+                            const originalText = btn.innerText;
+                            btn.innerText = "✓";
+                            btn.style.color = "#4caf50";
+                            btn.style.borderColor = "#4caf50";
+                            setTimeout(() => {
+                              btn.innerText = originalText;
+                              btn.style.color = "";
+                              btn.style.borderColor = "";
+                            }, 1500);
+                          }
+                        }
+                      }}
+                      disabled={!editDialog.bookmarkId || !onUpdateBookmark}
+                      sx={{ minWidth: 60 }}
+                    >
+                      Apply
+                    </Button>
+                  </Box>
+                );
+              })()}
+              
+              {/* Divider */}
+              <Divider />
+              
+              {/* Edit Section */}
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, color: "primary.main" }}>
+                Edit
+              </Typography>
+              <Box sx={{ display: "flex", gap: 1, alignItems: "flex-start" }}>
+                <TextField
+                  fullWidth
+                  label="New Value"
+                  size="small"
+                  value={editDialog.newValue}
+                  onChange={(e) =>
+                    setEditDialog((prev) => ({
+                      ...prev,
+                      newValue: e.target.value,
+                    }))
+                  }
+                  placeholder={(() => {
+                    const effectiveType = editDialog.valueType === "ptr" 
+                      ? (editDialog.ptrValueType || "int32") 
+                      : editDialog.valueType;
+                    const integerTypes = ["int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64"];
+                    if (effectiveType && integerTypes.includes(effectiveType)) {
+                      return editDialog.inputFormat === "hex"
+                        ? "0x1A2B or 1A2B"
+                        : "Enter decimal value...";
+                    }
+                    return "Enter value...";
+                  })()}
+                  autoFocus
+                  sx={{
+                    "& .MuiInputBase-input": {
+                      fontFamily: "monospace",
+                    },
+                  }}
+                />
+                <Button 
+                  onClick={handleEditDialogSave} 
+                  variant="contained"
+                  sx={{ minWidth: 70, height: 40 }}
+                >
+                  Save
+                </Button>
+              </Box>
             </Stack>
           </DialogContent>
           <DialogActions>
-            <Button onClick={handleEditDialogClose}>Cancel</Button>
-            <Button onClick={handleEditDialogSave} variant="contained">
-              Save
-            </Button>
+            <Button onClick={handleEditDialogClose}>Close</Button>
           </DialogActions>
         </Dialog>
 
@@ -3287,8 +4270,12 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
             <Stack spacing={2} sx={{ mt: 1 }}>
               <TextField
                 fullWidth
-                label="Memory Address"
-                placeholder="0x12345678 or libc.so + 0x120000"
+                label={manualBookmarkDialog.valueType === "ptr" ? "Pointer Expression" : "Memory Address"}
+                placeholder={
+                  manualBookmarkDialog.valueType === "ptr"
+                    ? "BASE+0x34ECA0 → [0x10] → [0x18] or [[Tutorial...]+0x100]+0x18"
+                    : "0x12345678 or libc.so + 0x120000"
+                }
                 value={manualBookmarkDialog.address}
                 onChange={(e) =>
                   setManualBookmarkDialog((prev) => ({
@@ -3297,7 +4284,11 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                   }))
                 }
                 autoFocus
-                helperText="Enter address in hex (0x...), decimal, or library+offset format"
+                helperText={
+                  manualBookmarkDialog.valueType === "ptr"
+                    ? "Enter pointer chain: BASE+offset → [offset] → [offset] or nested [[base]+offset]+offset"
+                    : "Enter address in hex (0x...), decimal, or library+offset format"
+                }
                 sx={{
                   "& .MuiInputBase-input": {
                     fontFamily: "monospace",
@@ -3325,6 +4316,7 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                     }));
                   }}
                 >
+                  <MenuItem value="ptr">ptr (Pointer Chain)</MenuItem>
                   <MenuItem value="int8">int8</MenuItem>
                   <MenuItem value="uint8">uint8</MenuItem>
                   <MenuItem value="int16">int16</MenuItem>
@@ -3339,6 +4331,36 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                   <MenuItem value="bytes">bytes</MenuItem>
                 </Select>
               </Box>
+              {/* Pointer value type selection for ptr type */}
+              {manualBookmarkDialog.valueType === "ptr" && (
+                <Box>
+                  <InputLabel id="bookmark-ptr-value-type-label">
+                    Value Type (at final address)
+                  </InputLabel>
+                  <Select
+                    labelId="bookmark-ptr-value-type-label"
+                    fullWidth
+                    value={manualBookmarkDialog.ptrValueType}
+                    onChange={(e) =>
+                      setManualBookmarkDialog((prev) => ({
+                        ...prev,
+                        ptrValueType: e.target.value as Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">,
+                      }))
+                    }
+                  >
+                    <MenuItem value="int8">int8</MenuItem>
+                    <MenuItem value="uint8">uint8</MenuItem>
+                    <MenuItem value="int16">int16</MenuItem>
+                    <MenuItem value="uint16">uint16</MenuItem>
+                    <MenuItem value="int32">int32</MenuItem>
+                    <MenuItem value="uint32">uint32</MenuItem>
+                    <MenuItem value="int64">int64</MenuItem>
+                    <MenuItem value="uint64">uint64</MenuItem>
+                    <MenuItem value="float">float</MenuItem>
+                    <MenuItem value="double">double</MenuItem>
+                  </Select>
+                </Box>
+              )}
               {/* Size field for string/bytes types */}
               {(manualBookmarkDialog.valueType === "string" ||
                 manualBookmarkDialog.valueType === "bytes") && (
@@ -3361,37 +4383,42 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
                   inputProps={{ min: 1, max: 1024 }}
                 />
               )}
-              {/* Display format for integer types */}
-              {!["string", "bytes", "float", "double"].includes(
-                manualBookmarkDialog.valueType
-              ) && (
-                <Box>
-                  <InputLabel id="bookmark-display-format-label">
-                    Display Format
-                  </InputLabel>
-                  <RadioGroup
-                    row
-                    value={manualBookmarkDialog.displayFormat}
-                    onChange={(e) =>
-                      setManualBookmarkDialog((prev) => ({
-                        ...prev,
-                        displayFormat: e.target.value as "dec" | "hex",
-                      }))
-                    }
-                  >
-                    <FormControlLabel
-                      value="dec"
-                      control={<Radio size="small" />}
-                      label="Decimal"
-                    />
-                    <FormControlLabel
-                      value="hex"
-                      control={<Radio size="small" />}
-                      label="Hexadecimal"
-                    />
-                  </RadioGroup>
-                </Box>
-              )}
+              {/* Display format for integer types (including ptr with integer ptrValueType) */}
+              {(() => {
+                const valueType = manualBookmarkDialog.valueType;
+                const ptrValueType = manualBookmarkDialog.ptrValueType;
+                const showDisplayFormat =
+                  (valueType === "ptr" && !["float", "double"].includes(ptrValueType)) ||
+                  (!["string", "bytes", "float", "double", "ptr"].includes(valueType));
+                return showDisplayFormat ? (
+                  <Box>
+                    <InputLabel id="bookmark-display-format-label">
+                      Display Format
+                    </InputLabel>
+                    <RadioGroup
+                      row
+                      value={manualBookmarkDialog.displayFormat}
+                      onChange={(e) =>
+                        setManualBookmarkDialog((prev) => ({
+                          ...prev,
+                          displayFormat: e.target.value as "dec" | "hex",
+                        }))
+                      }
+                    >
+                      <FormControlLabel
+                        value="dec"
+                        control={<Radio size="small" />}
+                        label="Decimal"
+                      />
+                      <FormControlLabel
+                        value="hex"
+                        control={<Radio size="small" />}
+                        label="Hexadecimal"
+                      />
+                    </RadioGroup>
+                  </Box>
+                ) : null;
+              })()}
               <TextField
                 fullWidth
                 label="Description (Optional)"

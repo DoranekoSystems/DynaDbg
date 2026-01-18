@@ -433,6 +433,7 @@ interface UIActions {
   clearScanHistory: () => void;
   setBookmarks: (bookmarks: any[]) => void;
   addBookmark: (bookmark: any) => void;
+  updateBookmark: (bookmarkId: string, updates: Partial<any>) => void;
   removeBookmark: (bookmarkId: string) => void;
 
   setToolsTab: (tab: number) => void;
@@ -1533,6 +1534,22 @@ export const useUIStore = create<UIState & { actions: UIActions }>()(
             }
 
             const newBookmarks = [...state.bookmarks, bookmark];
+            try {
+              localStorage.setItem("bookmarks", JSON.stringify(newBookmarks));
+            } catch (error) {
+              console.error("Failed to save bookmarks to localStorage:", error);
+            }
+            return {
+              bookmarks: newBookmarks,
+              lastUpdate: Date.now(),
+            };
+          }),
+
+        updateBookmark: (bookmarkId: string, updates: Partial<any>) =>
+          set((state) => {
+            const newBookmarks = state.bookmarks.map((b) =>
+              b.id === bookmarkId ? { ...b, ...updates } : b
+            );
             try {
               localStorage.setItem("bookmarks", JSON.stringify(newBookmarks));
             } catch (error) {

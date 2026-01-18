@@ -82,10 +82,10 @@ export const useScannerGlobalState = () => {
   );
 
   const updateBookmark = useCallback(
-    (_bookmarkId: string, _updates: Partial<BookmarkItem>) => {
-      console.warn("updateBookmark is not implemented yet");
+    (bookmarkId: string, updates: Partial<BookmarkItem>) => {
+      uiActions.updateBookmark(bookmarkId, updates);
     },
-    []
+    [uiActions]
   );
 
   const isAddressBookmarked = useCallback(
@@ -103,7 +103,8 @@ export const useScannerGlobalState = () => {
       description?: string,
       libraryExpression?: string,
       size?: number,
-      displayFormat?: "dec" | "hex"
+      displayFormat?: "dec" | "hex",
+      ptrValueType?: Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">
     ) => {
       try {
         console.log("[useScannerGlobalState] addManualBookmark called with:", {
@@ -113,110 +114,158 @@ export const useScannerGlobalState = () => {
           libraryExpression,
           size,
           displayFormat,
+          ptrValueType,
         });
 
-        // Normalize address to proper hex format
+        // For PTR type, the address is a pointer expression like [[base]+0x8]+0x10
+        // Skip normalization and use as-is
         let normalizedAddress = address.trim();
+        const isPtrType = valueType === "ptr";
 
-        // If address doesn't start with 0x, assume it's decimal and convert to hex
-        if (!/^0x/i.test(normalizedAddress)) {
-          const decimalValue = parseInt(normalizedAddress, 10);
-          if (!isNaN(decimalValue)) {
-            normalizedAddress = `0x${decimalValue.toString(16).toUpperCase()}`;
+        if (!isPtrType) {
+          // Normalize address to proper hex format
+          // If address doesn't start with 0x, assume it's decimal and convert to hex
+          if (!/^0x/i.test(normalizedAddress)) {
+            const decimalValue = parseInt(normalizedAddress, 10);
+            if (!isNaN(decimalValue)) {
+              normalizedAddress = `0x${decimalValue.toString(16).toUpperCase()}`;
+            } else {
+              throw new Error("Invalid address format");
+            }
           } else {
-            throw new Error("Invalid address format");
+            // If already hex, ensure proper format (0x prefix, uppercase)
+            normalizedAddress = "0x" + normalizedAddress.slice(2).toUpperCase();
           }
-        } else {
-          // If already hex, ensure proper format (0x prefix, uppercase)
-          normalizedAddress = "0x" + normalizedAddress.slice(2).toUpperCase();
         }
 
         // Try to read current value from memory
         let currentValue = valueType === "string" ? "" : "0";
-        try {
-          const readSize =
-            valueType === "int8" || valueType === "uint8"
-              ? 1
-              : valueType === "int16" || valueType === "uint16"
-                ? 2
-                : valueType === "int32" ||
-                    valueType === "uint32" ||
-                    valueType === "float"
-                  ? 4
-                  : valueType === "int64" ||
-                      valueType === "uint64" ||
-                      valueType === "double"
-                    ? 8
-                    : valueType === "string"
-                      ? size || 64
-                      : valueType === "bytes"
-                        ? size || 4
-                        : 4;
-
-          const buffer = await apiClient.readMemory(
-            normalizedAddress,
-            readSize
-          );
-          // Convert buffer to value based on type
-          const view = new DataView(buffer);
-
-          switch (valueType) {
-            case "int8":
-              currentValue = view.getInt8(0).toString();
-              break;
-            case "uint8":
-              currentValue = view.getUint8(0).toString();
-              break;
-            case "int16":
-              currentValue = view.getInt16(0, true).toString();
-              break;
-            case "uint16":
-              currentValue = view.getUint16(0, true).toString();
-              break;
-            case "int32":
-              currentValue = view.getInt32(0, true).toString();
-              break;
-            case "uint32":
-              currentValue = view.getUint32(0, true).toString();
-              break;
-            case "int64":
-              currentValue = view.getBigInt64(0, true).toString();
-              break;
-            case "uint64":
-              currentValue = view.getBigUint64(0, true).toString();
-              break;
-            case "float":
-              currentValue = view.getFloat32(0, true).toString();
-              break;
-            case "double":
-              currentValue = view.getFloat64(0, true).toString();
-              break;
-            case "string": {
-              const uint8Array = new Uint8Array(buffer);
-              let str = "";
-              for (let i = 0; i < uint8Array.length; i++) {
-                const byte = uint8Array[i];
-                if (byte === 0) break;
-                if (byte >= 32 && byte <= 126) {
-                  str += String.fromCharCode(byte);
-                }
+        
+        if (isPtrType) {
+          // For PTR type, resolve the pointer chain and read the value at the final address
+          try {
+            const resolveResult = await apiClient.resolveAddress(normalizedAddress);
+            if (resolveResult.success && resolveResult.data?.address) {
+              const resolvedAddr = `0x${resolveResult.data.address.toString(16).toUpperCase()}`;
+              // Always read 8 bytes for PTR type, mask based on ptrValueType for display
+              const buffer = await apiClient.readMemory(resolvedAddr, 8);
+              const view = new DataView(buffer);
+              const fullValue = view.getBigUint64(0, true);
+              
+              // Mask based on ptrValueType for display
+              const effectiveType = ptrValueType || "int32";
+              let maskedValue: bigint;
+              switch (effectiveType) {
+                case "int8":
+                case "uint8":
+                  maskedValue = fullValue & 0xFFn;
+                  break;
+                case "int16":
+                case "uint16":
+                  maskedValue = fullValue & 0xFFFFn;
+                  break;
+                case "int32":
+                case "uint32":
+                case "float":
+                  maskedValue = fullValue & 0xFFFFFFFFn;
+                  break;
+                default:
+                  maskedValue = fullValue;
               }
-              currentValue = str;
-              break;
+              currentValue = maskedValue.toString();
+            } else {
+              currentValue = "N/A";
             }
-            case "bytes": {
-              currentValue = Array.from(new Uint8Array(buffer))
-                .map((b) => b.toString(16).padStart(2, "0").toUpperCase())
-                .join(" ");
-              break;
-            }
-            default:
-              currentValue = "0";
+          } catch (error) {
+            console.warn(`Could not resolve pointer chain: ${normalizedAddress}`);
+            currentValue = "N/A";
           }
-        } catch (error) {
-          console.warn(
-            `Could not read memory at ${normalizedAddress}, using default value`
-          );
+        } else {
+          try {
+            const readSize =
+              valueType === "int8" || valueType === "uint8"
+                ? 1
+                : valueType === "int16" || valueType === "uint16"
+                  ? 2
+                  : valueType === "int32" ||
+                      valueType === "uint32" ||
+                      valueType === "float"
+                    ? 4
+                    : valueType === "int64" ||
+                        valueType === "uint64" ||
+                        valueType === "double"
+                      ? 8
+                      : valueType === "string"
+                        ? size || 64
+                        : valueType === "bytes"
+                          ? size || 4
+                          : 4;
+
+            const buffer = await apiClient.readMemory(
+              normalizedAddress,
+              readSize
+            );
+            // Convert buffer to value based on type
+            const view = new DataView(buffer);
+
+            switch (valueType) {
+              case "int8":
+                currentValue = view.getInt8(0).toString();
+                break;
+              case "uint8":
+                currentValue = view.getUint8(0).toString();
+                break;
+              case "int16":
+                currentValue = view.getInt16(0, true).toString();
+                break;
+              case "uint16":
+                currentValue = view.getUint16(0, true).toString();
+                break;
+              case "int32":
+                currentValue = view.getInt32(0, true).toString();
+                break;
+              case "uint32":
+                currentValue = view.getUint32(0, true).toString();
+                break;
+              case "int64":
+                currentValue = view.getBigInt64(0, true).toString();
+                break;
+              case "uint64":
+                currentValue = view.getBigUint64(0, true).toString();
+                break;
+              case "float":
+                currentValue = view.getFloat32(0, true).toString();
+                break;
+              case "double":
+                currentValue = view.getFloat64(0, true).toString();
+                break;
+              case "string": {
+                const uint8Array = new Uint8Array(buffer);
+                let str = "";
+                for (let i = 0; i < uint8Array.length; i++) {
+                  const byte = uint8Array[i];
+                  if (byte === 0) break;
+                  if (byte >= 32 && byte <= 126) {
+                    str += String.fromCharCode(byte);
+                  }
+                }
+                currentValue = str;
+                break;
+              }
+              case "bytes": {
+                currentValue = Array.from(new Uint8Array(buffer))
+                  .map((b) => b.toString(16).padStart(2, "0").toUpperCase())
+                  .join(" ");
+                break;
+              }
+              default:
+                currentValue = "0";
+            }
+          } catch (error) {
+            console.warn(
+              `Could not read memory at ${normalizedAddress}, using default value`
+            );
+          }
         }
 
         const newBookmark: BookmarkItem = {
@@ -225,6 +274,7 @@ export const useScannerGlobalState = () => {
           libraryExpression: libraryExpression, // Save library+offset expression if provided
           value: currentValue,
           type: valueType,
+          ptrValueType: valueType === "ptr" ? (ptrValueType || "int32") : undefined,
           size:
             valueType === "string" || valueType === "bytes" ? size : undefined,
           description: description || `Manual bookmark`,

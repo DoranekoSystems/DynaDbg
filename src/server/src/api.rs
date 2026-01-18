@@ -41,6 +41,7 @@ use warp::hyper::Body;
 use warp::{http::Response, http::StatusCode, Filter, Rejection, Reply};
 
 use crate::native_bridge::{self, ExceptionType};
+use crate::ptrscan;
 use crate::request;
 use crate::util;
 use crate::wasm_bridge;
@@ -5433,5 +5434,45 @@ pub async fn yara_scan_handler(
             scanned_bytes: 0,
         };
         Ok(warp::reply::json(&response))
+    }
+}
+
+/// Handler for generating full pointermap (entire process memory)
+pub async fn generate_pointermap_handler(
+    pid_state: Arc<Mutex<Option<i32>>>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    if let Some(pid) = *pid_state.lock().unwrap() {
+        match ptrscan::generate_pointermap(pid) {
+            Ok(data) => {
+                // Return as binary data with proper content type
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/octet-stream")
+                    .header("Content-Disposition", "attachment; filename=\"pointermap.dptr\"")
+                    .body(Body::from(data))
+                    .unwrap())
+            }
+            Err(e) => {
+                let response = serde_json::json!({
+                    "success": false,
+                    "message": format!("Failed to generate pointermap: {}", e)
+                });
+                Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&response).unwrap()))
+                    .unwrap())
+            }
+        }
+    } else {
+        let response = serde_json::json!({
+            "success": false,
+            "message": "No process attached"
+        });
+        Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&response).unwrap()))
+            .unwrap())
     }
 }

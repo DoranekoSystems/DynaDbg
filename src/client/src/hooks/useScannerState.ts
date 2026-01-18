@@ -73,6 +73,7 @@ const mapToBackendDataType = (valueType: ScanValueType): string => {
     string: "string",
     bytes: "bytes",
     regex: "regex",
+    ptr: "ptr",
   };
   return mapping[valueType] || "int32";
 };
@@ -926,12 +927,184 @@ export const useScannerState = () => {
     [uiActions]
   );
 
+  // Perform pointer scan using Tauri command
+  const performPointerScan = useCallback(
+    async (currentSettings: ScanSettings) => {
+      console.log("Starting pointer scan...");
+
+      setScannerState((prev) => ({
+        ...prev,
+        isScanning: true,
+        scanProgress: 0,
+      }));
+
+      uiActions.updateScannerState({
+        isScanning: true,
+        scanProgress: 0,
+      });
+
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+
+        // Prepare files with target addresses
+        const files = (currentSettings.ptrMapFilePaths || []).map(
+          (f: { path: string; name: string; targetAddress?: string }) => ({
+            path: f.path,
+            targetAddress: f.targetAddress || "",
+          })
+        );
+
+        if (files.length < 2) {
+          throw new Error("At least 2 PointerMap files are required");
+        }
+
+        // Check all files have target addresses
+        for (const file of files) {
+          if (!file.targetAddress) {
+            throw new Error(
+              "All PointerMap files must have a target address set"
+            );
+          }
+        }
+
+        // Update progress: Loading files
+        uiActions.updateScannerState({ 
+          scanProgress: 10,
+          currentRegion: "Loading PointerMap files..."
+        });
+
+        console.log("Calling run_pointer_scan with:", {
+          files,
+          maxDepth: currentSettings.ptrMaxDepth || 5,
+          maxOffset: currentSettings.ptrMaxOffset || 4096,
+        });
+
+        // Set up event listener for PTR scan progress
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen<{
+          nodesProcessed: number;
+          chainsFound: number;
+          fileIndex: number;
+          totalFiles: number;
+        }>("ptr-scan-progress", (event) => {
+          const { nodesProcessed, chainsFound, fileIndex, totalFiles } = event.payload;
+          uiActions.updateScannerState({
+            currentRegion: `File ${fileIndex + 1}/${totalFiles}: Nodes: ${nodesProcessed.toLocaleString()} / Chains: ${chainsFound.toLocaleString()}`
+          });
+        });
+
+        // Update progress: Scanning
+        uiActions.updateScannerState({ 
+          scanProgress: 30,
+          currentRegion: "Scanning for pointer chains..."
+        });
+
+        const results = await invoke<
+          Array<{
+            chain: Array<{ module?: string; offset: number }>;
+            finalAddress: string;
+          }>
+        >("run_pointer_scan", {
+          files,
+          maxDepth: currentSettings.ptrMaxDepth || 5,
+          maxOffset: currentSettings.ptrMaxOffset || 4096,
+        });
+
+        // Stop listening for progress events
+        unlisten();
+
+        // Update progress: Processing results
+        uiActions.updateScannerState({ 
+          scanProgress: 80,
+          currentRegion: "Processing results..."
+        });
+
+        console.log(`Pointer scan found ${results.length} results`);
+
+        // Convert pointer scan results to scan results format
+        // Format: baseaddress | offset0 | offset1 | ...
+        const scanResults: ScanResult[] = results.map((result, index) => {
+          // Build chain parts: first is base (module+offset), rest are offsets
+          const chainParts: string[] = [];
+          
+          // Helper to extract filename from path
+          const getFileName = (path: string): string => {
+            const parts = path.split(/[\\/]/);
+            return parts[parts.length - 1] || path;
+          };
+          
+          for (let i = 0; i < result.chain.length; i++) {
+            const step = result.chain[i];
+            if (i === 0 && step.module) {
+              // Base address: module filename + offset (lowercase hex)
+              const moduleName = getFileName(step.module);
+              chainParts.push(`${moduleName}+0x${step.offset.toString(16)}`);
+            } else {
+              // Offset (lowercase hex)
+              const offsetStr = step.offset >= 0
+                ? `0x${step.offset.toString(16)}`
+                : `-0x${Math.abs(step.offset).toString(16)}`;
+              chainParts.push(offsetStr);
+            }
+          }
+          
+          const chainStr = chainParts.join(" | ");
+
+          return {
+            address: result.finalAddress,
+            value: chainStr,
+            previousValue: "",
+            moduleName: result.chain[0]?.module || "",
+            type: "ptr" as ScanValueType,
+            index: index,
+          };
+        });
+
+        // Update state with results
+        setScannerState((prev) => ({
+          ...prev,
+          scanResults,
+          totalResults: scanResults.length,
+          isScanning: false,
+          scanProgress: 100,
+        }));
+
+        uiActions.updateScannerState({
+          isScanning: false,
+          scanProgress: 100,
+          scanResults,
+          totalResults: scanResults.length,
+        });
+
+        console.log("Pointer scan complete");
+      } catch (error) {
+        console.error("Pointer scan failed:", error);
+        setScannerState((prev) => ({
+          ...prev,
+          isScanning: false,
+          scanProgress: 0,
+        }));
+        uiActions.updateScannerState({
+          isScanning: false,
+          scanProgress: 0,
+        });
+      }
+    },
+    [uiActions]
+  );
+
   const performFirstScan = useCallback(async () => {
     const currentScanId = scannerState.scanId;
     console.log(`Starting first scan with ID: ${currentScanId}`);
 
     // Get current settings from global store to ensure we have the latest
-    const currentSettings = ui.scannerState.scanSettings;
+    const currentSettings = ui.scannerState.scanSettings as ScanSettings;
+
+    // Handle PTR mode (pointer scan)
+    if (currentSettings.searchMode === "ptr") {
+      await performPointerScan(currentSettings);
+      return;
+    }
 
     setScannerState((prev) => ({
       ...prev,
@@ -1819,7 +1992,9 @@ export const useScannerState = () => {
       valueType: ScanValueType,
       description?: string,
       libraryExpression?: string,
-      size?: number
+      size?: number,
+      displayFormat?: "dec" | "hex",
+      ptrValueType?: Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">
     ) => {
       try {
         console.log("[addManualBookmark] Called with:", {
@@ -1828,7 +2003,38 @@ export const useScannerState = () => {
           description,
           libraryExpression,
           size,
+          displayFormat,
+          ptrValueType,
         });
+
+        // For PTR type, the address is a pointer expression like [[base]+0x8]+0x10
+        // Don't normalize it as a hex address
+        const addressTrimmed = address.trim();
+        
+        if (valueType === "ptr") {
+          // PTR type: keep the pointer expression as-is
+          // Just store it directly without trying to parse as hex
+          const newBookmark: BookmarkItem = {
+            id: `bookmark-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            address: addressTrimmed,
+            value: "(pointer chain)",
+            type: valueType,
+            ptrValueType: ptrValueType || "int32",
+            description: description || "Pointer chain",
+            displayFormat: displayFormat,
+            createdAt: new Date(),
+            tags: [],
+          };
+          
+          if (!bookmarks.some((b) => b.address === addressTrimmed)) {
+            uiActions.addBookmark(newBookmark);
+            console.log("[addManualBookmark] PTR bookmark added:", newBookmark);
+            return true;
+          } else {
+            console.warn("[addManualBookmark] PTR address already bookmarked:", addressTrimmed);
+            return false;
+          }
+        }
 
         // Normalize address to proper hex format
         let normalizedAddress = address.trim();

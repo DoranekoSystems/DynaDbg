@@ -225,6 +225,16 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
             api::disassemble_handler(disasm_request, pid_state).await
         });
 
+    // Pointer Map Routes
+    let generate_pointermap = api
+        .and(warp::path!("memory" / "pointermap"))
+        .and(warp::get())
+        .and(api::with_auth())
+        .and(api::with_state(pid_state.clone()))
+        .and_then(|pid_state| async move {
+            api::generate_pointermap_handler(pid_state).await
+        });
+
     // Debug Routes
     let set_watchpoint = api
         .and(warp::path!("debug" / "watchpoint"))
@@ -414,7 +424,7 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
 
     // Utility Routes
     let resolve_addr = api
-        .and(warp::path!("utils" / "resolve-address"))
+        .and(warp::path!("memory" / "resolve"))
         .and(warp::get())
         .and(warp::query::<request::ResolveAddrRequest>())
         .and(api::with_auth())
@@ -670,6 +680,8 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
         .or(stop_scan)
         .or(clear_scan)
         .or(disassemble)
+        .or(generate_pointermap)
+        .or(resolve_addr)
         .boxed();
     
     // Group 3: Debug routes
@@ -694,8 +706,7 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
         .boxed();
     
     // Group 4: Utility routes
-    let utility_routes = resolve_addr
-        .or(explore_directory)
+    let utility_routes = explore_directory
         .or(read_file)
         .or(upload_file)
         .or(wasm_dump)

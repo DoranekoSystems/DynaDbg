@@ -12,6 +12,7 @@ mod logger;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod macho_bridge;
 mod native_bridge;
+mod ptrscan;
 mod request;
 mod serve;
 mod util;

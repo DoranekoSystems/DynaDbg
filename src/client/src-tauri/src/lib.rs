@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use capstone::prelude::*;
-use tauri::{Manager, PhysicalSize, Size};
+use tauri::{Manager, PhysicalSize, Size, Emitter};
 use cpp_demangle::Symbol as CppSymbol;
 use rustc_demangle::demangle as rustc_demangle;
 use std::path::PathBuf;
@@ -6199,6 +6199,398 @@ async fn select_folder_dialog(title: String) -> Result<Option<String>, String> {
     Ok(folder.map(|f| f.path().to_string_lossy().to_string()))
 }
 
+/// Open a save file dialog and save binary data to the selected path
+#[tauri::command]
+async fn save_binary_file_dialog(
+    title: String,
+    default_filename: String,
+    filter_name: String,
+    filter_extensions: Vec<String>,
+    data: Vec<u8>,
+) -> Result<Option<String>, String> {
+    use rfd::AsyncFileDialog;
+    use tokio::fs;
+    
+    let extensions: Vec<&str> = filter_extensions.iter().map(|s| s.as_str()).collect();
+    
+    let dialog = AsyncFileDialog::new()
+        .set_title(&title)
+        .set_file_name(&default_filename)
+        .add_filter(&filter_name, &extensions);
+    
+    let file = dialog.save_file().await;
+    
+    if let Some(file_handle) = file {
+        let path = file_handle.path().to_string_lossy().to_string();
+        fs::write(file_handle.path(), &data)
+            .await
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Open a file dialog to select multiple PointerMap files
+#[tauri::command]
+async fn open_pointermap_files_dialog() -> Result<Vec<PointerMapFileInfo>, String> {
+    use rfd::AsyncFileDialog;
+    
+    let dialog = AsyncFileDialog::new()
+        .set_title("Select PointerMap Files")
+        .add_filter("PointerMap Files", &["dptr"]);
+    
+    let files = dialog.pick_files().await;
+    
+    if let Some(file_handles) = files {
+        let result: Vec<PointerMapFileInfo> = file_handles
+            .iter()
+            .map(|f| PointerMapFileInfo {
+                path: f.path().to_string_lossy().to_string(),
+                name: f.file_name(),
+            })
+            .collect();
+        Ok(result)
+    } else {
+        Ok(vec![])
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PointerMapFileInfo {
+    path: String,
+    name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PointerScanFileInput {
+    path: String,
+    #[serde(rename = "targetAddress")]
+    target_address: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PointerChainStep {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module: Option<String>,
+    offset: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PointerScanResult {
+    chain: Vec<PointerChainStep>,
+    #[serde(rename = "finalAddress")]
+    final_address: String,
+}
+
+/// Run multi-level pointer scan to find common pointer paths across multiple PointerMap files
+/// Each file has its own target address
+#[tauri::command]
+async fn run_pointer_scan(
+    app_handle: tauri::AppHandle,
+    files: Vec<PointerScanFileInput>,
+    max_depth: u32,
+    max_offset: u32,
+    max_results: Option<u32>,
+) -> Result<Vec<PointerScanResult>, String> {
+    use lz4_flex::decompress_size_prepended;
+    use std::collections::{HashMap, HashSet};
+    
+    // Use provided max_results or default to 1000
+    let max_results = max_results.unwrap_or(1000) as usize;
+    
+    if files.len() < 2 {
+        return Err("At least 2 PointerMap files are required".to_string());
+    }
+    
+    // Parse target addresses for each file
+    let mut target_addresses: Vec<u64> = Vec::new();
+    for file in &files {
+        let target_addr = u64::from_str_radix(
+            file.target_address.trim_start_matches("0x").trim_start_matches("0X"),
+            16
+        ).map_err(|e| format!("Invalid target address '{}': {}", file.target_address, e))?;
+        target_addresses.push(target_addr);
+    }
+    
+    // Load and parse all PointerMap files
+    let mut all_pointer_maps: Vec<PointerMapData> = Vec::new();
+    
+    for file in &files {
+        let compressed_data = tokio::fs::read(&file.path)
+            .await
+            .map_err(|e| format!("Failed to read file {}: {}", file.path, e))?;
+        
+        let data = decompress_size_prepended(&compressed_data)
+            .map_err(|e| format!("Failed to decompress {}: {}", file.path, e))?;
+        
+        let pointer_map = parse_pointer_map(&data)?;
+        all_pointer_maps.push(pointer_map);
+    }
+    
+    // Find pointer paths to the target addresses
+    let mut results: Vec<PointerScanResult> = Vec::new();
+    
+    // Build reverse pointer maps for each file (what addresses point TO a given address)
+    let mut reverse_maps: Vec<HashMap<u64, Vec<(u64, Option<(u32, u32)>)>>> = Vec::new();
+    
+    for pm in &all_pointer_maps {
+        let mut reverse_map: HashMap<u64, Vec<(u64, Option<(u32, u32)>)>> = HashMap::new();
+        for (target, pointers) in &pm.pointers {
+            for (ptr_addr, static_data) in pointers {
+                reverse_map.entry(*target).or_default().push((*ptr_addr, *static_data));
+            }
+        }
+        reverse_maps.push(reverse_map);
+    }
+    
+    // For each file, find pointer chains from static addresses to the target
+    // A chain is represented as: [(module_name, module_offset), offset1, offset2, ...]
+    // where each offset is the delta to add after dereferencing
+    
+    #[derive(Clone, Debug, Hash, Eq, PartialEq)]
+    struct NormalizedChain {
+        base_module: String,
+        base_offset: u32,
+        offsets: Vec<i64>, // offsets to add after each dereference
+    }
+    
+    // Find chains for each file
+    let mut chains_per_file: Vec<Vec<NormalizedChain>> = Vec::new();
+    
+    for (file_idx, target_addr) in target_addresses.iter().enumerate() {
+        let reverse_map = &reverse_maps[file_idx];
+        let pointer_map = &all_pointer_maps[file_idx];
+        let mut file_chains: Vec<NormalizedChain> = Vec::new();
+        // Track visited addresses with minimum depth to allow revisiting at shorter paths
+        let mut visited: HashMap<u64, usize> = HashMap::new();
+        
+        // Progress tracking
+        let mut nodes_processed: u64 = 0;
+        let mut last_progress_emit: u64 = 0;
+        
+        // BFS: (current_address, offsets_so_far)
+        // offsets_so_far contains the offsets from the current position to the target
+        let mut queue: Vec<(u64, Vec<i64>)> = vec![(*target_addr, vec![])];
+        
+        while let Some((current_addr, offsets)) = queue.pop() {
+            let current_depth = offsets.len();
+            nodes_processed += 1;
+            
+            // Emit progress every 1000 nodes
+            if nodes_processed - last_progress_emit >= 1000 {
+                last_progress_emit = nodes_processed;
+                let _ = app_handle.emit("ptr-scan-progress", serde_json::json!({
+                    "nodesProcessed": nodes_processed,
+                    "chainsFound": file_chains.len(),
+                    "fileIndex": file_idx,
+                    "totalFiles": files.len()
+                }));
+            }
+            
+            // Skip if we've already found this address at a shorter or equal depth
+            if let Some(&prev_depth) = visited.get(&current_addr) {
+                if prev_depth <= current_depth {
+                    continue;
+                }
+            }
+            visited.insert(current_addr, current_depth);
+            
+            // Find addresses that point to current_addr (with offset consideration)
+            for pointed_addr in current_addr.saturating_sub(max_offset as u64)..=current_addr {
+                if let Some(ptrs) = reverse_map.get(&pointed_addr) {
+                    let delta = (current_addr as i64) - (pointed_addr as i64);
+                    
+                    for (ptr_addr, static_data) in ptrs {
+                        let mut new_offsets = vec![delta];
+                        new_offsets.extend(offsets.iter().copied());
+                        
+                        // Check depth AFTER adding new offset
+                        // new_offsets.len() is the number of dereferences needed
+                        if new_offsets.len() > max_depth as usize {
+                            continue;
+                        }
+                        
+                        if let Some((module_idx, module_offset)) = static_data {
+                            // Found a chain starting from a static address
+                            let module_name = if (*module_idx as usize) < pointer_map.modules.len() {
+                                pointer_map.modules[*module_idx as usize].name.clone()
+                            } else {
+                                format!("module_{}", module_idx)
+                            };
+                            
+                            file_chains.push(NormalizedChain {
+                                base_module: module_name,
+                                base_offset: *module_offset,
+                                offsets: new_offsets,
+                            });
+                            
+                            if file_chains.len() >= max_results {
+                                break;
+                            }
+                        } else {
+                            // Continue searching backwards only if we haven't exceeded depth
+                            queue.push((*ptr_addr, new_offsets));
+                        }
+                    }
+                }
+                
+                if file_chains.len() >= max_results {
+                    break;
+                }
+            }
+            
+            if file_chains.len() >= max_results {
+                break;
+            }
+        }
+        
+        chains_per_file.push(file_chains);
+    }
+    
+    // Find chains that exist in ALL files (same module name, base offset, and offset sequence)
+    if chains_per_file.is_empty() {
+        return Ok(vec![]);
+    }
+    
+    // Start with chains from first file, then intersect with others
+    let first_chains: HashSet<NormalizedChain> = chains_per_file[0].iter().cloned().collect();
+    let mut common_chains = first_chains;
+    
+    for file_chains in chains_per_file.iter().skip(1) {
+        let file_chain_set: HashSet<NormalizedChain> = file_chains.iter().cloned().collect();
+        common_chains = common_chains.intersection(&file_chain_set).cloned().collect();
+    }
+    
+    // Convert to results
+    for chain in common_chains.iter().take(100) {
+        let mut result_chain: Vec<PointerChainStep> = vec![PointerChainStep {
+            module: Some(chain.base_module.clone()),
+            offset: chain.base_offset as i64,
+        }];
+        
+        for &offset in &chain.offsets {
+            result_chain.push(PointerChainStep {
+                module: None,
+                offset,
+            });
+        }
+        
+        results.push(PointerScanResult {
+            chain: result_chain,
+            final_address: format!("0x{:X}", target_addresses[0]),
+        });
+    }
+    
+    Ok(results)
+}
+
+struct ModuleInfo {
+    name: String,
+    #[allow(dead_code)]
+    base_address: u64,
+    #[allow(dead_code)]
+    size: u32,
+}
+
+struct PointerMapData {
+    modules: Vec<ModuleInfo>,
+    pointers: HashMap<u64, Vec<(u64, Option<(u32, u32)>)>>, // target -> [(source_addr, (module_idx, offset))]
+}
+
+fn parse_pointer_map(data: &[u8]) -> Result<PointerMapData, String> {
+    let mut cursor = 0;
+    
+    // Check magic "DPTR"
+    if data.len() < 8 {
+        return Err("Invalid PointerMap: too short".to_string());
+    }
+    if &data[0..4] != b"DPTR" {
+        return Err("Invalid PointerMap: wrong magic".to_string());
+    }
+    cursor += 4;
+    
+    // Version
+    let _version = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap());
+    cursor += 4;
+    
+    // Number of modules
+    let module_count = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+    cursor += 4;
+    
+    let mut modules = Vec::with_capacity(module_count);
+    for _ in 0..module_count {
+        let name_len = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+        cursor += 4;
+        
+        let name = String::from_utf8_lossy(&data[cursor..cursor+name_len]).to_string();
+        cursor += name_len;
+        
+        let base_address = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap());
+        cursor += 8;
+        
+        let size = i32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as u32;
+        cursor += 4;
+        
+        modules.push(ModuleInfo { name, base_address, size });
+    }
+    
+    // Number of unique targets
+    let target_count = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap()) as usize;
+    cursor += 8;
+    
+    // Total pointer count
+    let _total_pointers = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap());
+    cursor += 8;
+    
+    // Read pointer entries
+    let mut pointers: HashMap<u64, Vec<(u64, Option<(u32, u32)>)>> = HashMap::with_capacity(target_count);
+    
+    for _ in 0..target_count {
+        if cursor + 12 > data.len() {
+            break;
+        }
+        
+        let target_value = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap());
+        cursor += 8;
+        
+        let ptr_count = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+        cursor += 4;
+        
+        let mut ptrs = Vec::with_capacity(ptr_count);
+        for _ in 0..ptr_count {
+            if cursor + 9 > data.len() {
+                break;
+            }
+            
+            let ptr_addr = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap());
+            cursor += 8;
+            
+            let has_static = data[cursor] != 0;
+            cursor += 1;
+            
+            let static_data = if has_static {
+                if cursor + 8 > data.len() {
+                    break;
+                }
+                let module_idx = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap());
+                cursor += 4;
+                let offset = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap());
+                cursor += 4;
+                Some((module_idx, offset))
+            } else {
+                None
+            };
+            
+            ptrs.push((ptr_addr, static_data));
+        }
+        
+        pointers.insert(target_value, ptrs);
+    }
+    
+    Ok(PointerMapData { modules, pointers })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -6293,6 +6685,10 @@ pub fn run() {
             ghidra_analyze_reachability,
             read_local_text_file,
             select_folder_dialog,
+            save_binary_file_dialog,
+            // Pointer scan commands
+            open_pointermap_files_dialog,
+            run_pointer_scan,
             // WASM analysis commands
             save_wasm_binary,
             list_wasm_files,

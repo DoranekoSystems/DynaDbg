@@ -123,6 +123,9 @@ pub fn http_log(info: Info) {
     if info.path() == "/api/debug/exception" && (info.method() == "GET" || info.method() == "OPTIONS") {
         return;
     }
+    if info.path() == "/api/memory/resolve" && (info.method() == "GET" || info.method() == "OPTIONS") {
+        return;
+    }
     if info.path() == "/health" && (info.method() == "GET" || info.method() == "OPTIONS") {
         return;
     }

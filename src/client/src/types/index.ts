@@ -118,7 +118,8 @@ export type ScanValueType =
   | "double"
   | "string"
   | "bytes"
-  | "regex";
+  | "regex"
+  | "ptr";
 
 export interface ScanSettings {
   valueType: ScanValueType;
@@ -135,8 +136,13 @@ export interface ScanSettings {
   executable: boolean | null; // true = required, false = excluded, null = don't care
   readable: boolean | null; // true = required, false = excluded, null = don't care
   doSuspend: boolean;
-  searchMode: "normal" | "yara"; // Toggle between normal value search and YARA rule search
+  searchMode: "normal" | "yara" | "ptr"; // Toggle between normal value search, YARA rule search, and pointer scan
   yaraRule?: string; // YARA rule source code
+  ptrMaxDepth?: number; // Max depth for pointer scan (default: 5)
+  ptrMaxOffset?: number; // Max offset for pointer scan (default: 4096)
+  ptrMapFiles?: string[]; // Selected .dptr file names for pointer scan
+  ptrMapFilePaths?: { path: string; name: string; targetAddress?: string }[]; // Full paths, names and target addresses for pointer scan files
+  ptrMapFileHandles?: File[]; // File handles for the selected .dptr files (legacy browser mode)
 }
 
 export type ScanType =
@@ -300,13 +306,14 @@ export interface ScanHistoryItem {
 
 export interface BookmarkItem {
   id: string;
-  address: string; // Resolved numeric address (e.g., "0x100120000")
+  address: string; // Resolved numeric address (e.g., "0x100120000") or pointer expression (e.g., "BASE+0x100 → [0x10] → [0x18]")
   libraryExpression?: string; // Optional library+offset format (e.g., "UnityFramework + 0x120000")
   value: string;
   type: ScanValueType;
+  ptrValueType?: Exclude<ScanValueType, "ptr" | "string" | "bytes" | "regex">; // For ptr type: the underlying value type to read
   size?: number; // Size in bytes for string/bytes types
   description?: string;
-  displayFormat?: "dec" | "hex"; // Display format for integer values
+  displayFormat?: "dec" | "hex"; // Display format for integer values (also applies to ptr type)
   createdAt: Date;
   tags?: string[];
 }

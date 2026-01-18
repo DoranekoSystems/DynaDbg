@@ -58,7 +58,7 @@ Please refer to the [Wiki](https://github.com/DoranekoSystems/DynaDbg/wiki/Devel
 
 - Memory Scan
 
-  `Normal` | `YARA`
+  `Normal` | `YARA` | `Pointer`
   <img width="756" height="556" alt="" src="https://github.com/user-attachments/assets/4b11a095-bda5-4cc3-a4e5-536058a7853b" />
 
 - Hardware Watchpoint

@@ -47,6 +47,10 @@ on:
         description: "Build macOS Server (arm64)"
         type: boolean
         default: false
+      build_server_linux_arm64:
+        description: "Build Linux Server (ARM64)"
+        type: boolean
+        default: false
 
       # macOS options
       notarize_macos:
@@ -594,6 +598,33 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-server-ios-${{ hashFiles('src/server/Cargo.lock') }}
 
+      - name: Clone MachOKit
+        run: |
+          git clone --depth 1 https://github.com/p-x9/MachOKit.git MachOKit
+
+      - name: Cache MachOBridge build
+        id: cache-machobridge-ios
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/server/src/swift/.build-xcode-ios
+          key: ${{ runner.os }}-machobridge-ios-${{ hashFiles('src/server/src/swift/**/*.swift', 'MachOKit/**/*.swift') }}
+
+      - name: Build MachOBridge for iOS
+        if: steps.cache-machobridge-ios.outputs.cache-hit != 'true'
+        run: |
+          cd src/server/src/swift
+          xcodebuild -scheme MachOBridge \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -sdk iphoneos \
+            -derivedDataPath .build-xcode-ios \
+            SKIP_INSTALL=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
       - name: Add Rust target
         run: rustup target add aarch64-apple-ios
 
@@ -632,6 +663,33 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-server-macos-${{ hashFiles('src/server/Cargo.lock') }}
 
+      - name: Clone MachOKit
+        run: |
+          git clone --depth 1 https://github.com/p-x9/MachOKit.git MachOKit
+
+      - name: Cache MachOBridge build
+        id: cache-machobridge-macos
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/server/src/swift/.build-xcode-macos
+          key: ${{ runner.os }}-machobridge-macos-${{ hashFiles('src/server/src/swift/**/*.swift', 'MachOKit/**/*.swift') }}
+
+      - name: Build MachOBridge for macOS
+        if: steps.cache-machobridge-macos.outputs.cache-hit != 'true'
+        run: |
+          cd src/server/src/swift
+          xcodebuild -scheme MachOBridge \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -sdk macosx \
+            -derivedDataPath .build-xcode-macos \
+            SKIP_INSTALL=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
       - name: Add Rust target
         run: rustup target add aarch64-apple-darwin
 
@@ -643,3 +701,35 @@ jobs:
         with:
           name: dbgsrv-macos-arm64-${{ github.event.inputs.version }}
           path: src/server/target/aarch64-apple-darwin/release/dbgsrv
+
+  # ============================================
+  # Linux Server (ARM64)
+  # ============================================
+  build-server-linux-arm64:
+    if: ${{ github.event.inputs.build_server_linux_arm64 == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt update && sudo apt install -y build-essential libssl-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-arm64-cargo-server-${{ hashFiles('src/server/Cargo.lock') }}
+
+      - name: Build Linux ARM64 Server
+        run: cd src/server && cargo build --target=aarch64-unknown-linux-gnu --release
+
+      - name: Upload Linux ARM64 Server
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbgsrv-linux-arm64-${{ github.event.inputs.version }}
+          path: src/server/target/aarch64-unknown-linux-gnu/release/dbgsrv
