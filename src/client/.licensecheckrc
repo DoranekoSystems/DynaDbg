@@ -1,0 +1,27 @@
+{
+  "production": true,
+  "onlyAllow": [
+    "MIT",
+    "MIT*",
+    "Apache-2.0",
+    "Apache 2.0",
+    "Apache License, Version 2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSD",
+    "BSD*",
+    "ISC",
+    "0BSD",
+    "CC0-1.0",
+    "CC-BY-3.0",
+    "CC-BY-4.0",
+    "Unlicense",
+    "WTFPL",
+    "Zlib",
+    "Python-2.0",
+    "BlueOak-1.0.0",
+    "MPL-2.0"
+  ],
+  "excludePackages": [],
+  "excludePrivatePackages": true
+}

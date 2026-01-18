@@ -2,12 +2,16 @@
   "name": "dyna-dbg",
   "private": true,
   "version": "0.1.0",
+  "license": "GPL-3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "license:check": "license-checker --production --onlyAllow 'MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;CC0-1.0;Unlicense;CC-BY-3.0;CC-BY-4.0;Python-2.0;BlueOak-1.0.0;MPL-2.0'",
+    "license:summary": "license-checker --production --summary",
+    "license:report": "license-checker --production --json > license-report.json"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

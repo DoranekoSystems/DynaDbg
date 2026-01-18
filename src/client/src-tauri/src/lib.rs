@@ -71,6 +71,11 @@ static GHIDRA_SERVER_LOGS: Lazy<Mutex<HashMap<String, Vec<String>>>> = Lazy::new
     Mutex::new(HashMap::new())
 });
 
+// Global pointer scan cancel flag
+static PTRSCAN_CANCEL: Lazy<std::sync::atomic::AtomicBool> = Lazy::new(|| {
+    std::sync::atomic::AtomicBool::new(false)
+});
+
 fn init_ghidra_db() -> Result<(), String> {
     let ghidra_dir = get_ghidra_projects_dir();
     std::fs::create_dir_all(&ghidra_dir).map_err(|e| e.to_string())?;
@@ -6285,6 +6290,7 @@ struct PointerScanResult {
 
 /// Run multi-level pointer scan to find common pointer paths across multiple PointerMap files
 /// Each file has its own target address
+/// Optimized algorithm: uses binary search for range queries, parallel BFS, and progressive intersection
 #[tauri::command]
 async fn run_pointer_scan(
     app_handle: tauri::AppHandle,
@@ -6294,195 +6300,405 @@ async fn run_pointer_scan(
     max_results: Option<u32>,
 ) -> Result<Vec<PointerScanResult>, String> {
     use lz4_flex::decompress_size_prepended;
+    use rayon::prelude::*;
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     
-    // Use provided max_results or default to 1000
+    // Reset cancel flag at the start
+    PTRSCAN_CANCEL.store(false, Ordering::Relaxed);
+    
     let max_results = max_results.unwrap_or(1000) as usize;
     
     if files.len() < 2 {
         return Err("At least 2 PointerMap files are required".to_string());
     }
     
-    // Parse target addresses for each file
-    let mut target_addresses: Vec<u64> = Vec::new();
-    for file in &files {
-        let target_addr = u64::from_str_radix(
-            file.target_address.trim_start_matches("0x").trim_start_matches("0X"),
-            16
-        ).map_err(|e| format!("Invalid target address '{}': {}", file.target_address, e))?;
-        target_addresses.push(target_addr);
-    }
+    // Parse target addresses
+    let target_addresses: Vec<u64> = files.iter()
+        .map(|file| {
+            u64::from_str_radix(
+                file.target_address.trim_start_matches("0x").trim_start_matches("0X"),
+                16
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Invalid target address: {}", e))?;
     
-    // Load and parse all PointerMap files
-    let mut all_pointer_maps: Vec<PointerMapData> = Vec::new();
+    // Emit initial progress - loading files
+    let _ = app_handle.emit("ptr-scan-progress", serde_json::json!({
+        "nodesProcessed": 0,
+        "chainsFound": 0,
+        "fileIndex": 0,
+        "totalFiles": files.len(),
+        "phase": "loading"
+    }));
     
-    for file in &files {
+    // Load all files first (async)
+    let mut file_data: Vec<Vec<u8>> = Vec::new();
+    for (idx, file) in files.iter().enumerate() {
+        let _ = app_handle.emit("ptr-scan-progress", serde_json::json!({
+            "nodesProcessed": 0,
+            "chainsFound": 0,
+            "fileIndex": idx,
+            "totalFiles": files.len(),
+            "phase": "loading"
+        }));
+        
         let compressed_data = tokio::fs::read(&file.path)
             .await
             .map_err(|e| format!("Failed to read file {}: {}", file.path, e))?;
-        
-        let data = decompress_size_prepended(&compressed_data)
-            .map_err(|e| format!("Failed to decompress {}: {}", file.path, e))?;
-        
-        let pointer_map = parse_pointer_map(&data)?;
-        all_pointer_maps.push(pointer_map);
+        file_data.push(compressed_data);
     }
     
-    // Find pointer paths to the target addresses
-    let mut results: Vec<PointerScanResult> = Vec::new();
+    let total_files = files.len();
     
-    // Build reverse pointer maps for each file (what addresses point TO a given address)
-    let mut reverse_maps: Vec<HashMap<u64, Vec<(u64, Option<(u32, u32)>)>>> = Vec::new();
+    // Emit decompressing phase
+    let _ = app_handle.emit("ptr-scan-progress", serde_json::json!({
+        "nodesProcessed": 0,
+        "chainsFound": 0,
+        "fileIndex": 0,
+        "totalFiles": total_files,
+        "phase": "decompressing"
+    }));
     
-    for pm in &all_pointer_maps {
-        let mut reverse_map: HashMap<u64, Vec<(u64, Option<(u32, u32)>)>> = HashMap::new();
-        for (target, pointers) in &pm.pointers {
-            for (ptr_addr, static_data) in pointers {
-                reverse_map.entry(*target).or_default().push((*ptr_addr, *static_data));
-            }
-        }
-        reverse_maps.push(reverse_map);
-    }
+    // Shared progress state - using std primitives for cross-thread access
+    let nodes_counter = Arc::new(AtomicU64::new(0));
+    let chains_counter = Arc::new(AtomicU64::new(0));
+    let file_idx_counter = Arc::new(AtomicU64::new(0));
+    let scan_complete = Arc::new(AtomicBool::new(false));
+    let phase_str = Arc::new(Mutex::new(String::from("scanning")));
     
-    // For each file, find pointer chains from static addresses to the target
-    // A chain is represented as: [(module_name, module_offset), offset1, offset2, ...]
-    // where each offset is the delta to add after dereferencing
+    // Clone for progress thread (std::thread, not tokio)
+    let nodes_for_progress = Arc::clone(&nodes_counter);
+    let chains_for_progress = Arc::clone(&chains_counter);
+    let file_idx_for_progress = Arc::clone(&file_idx_counter);
+    let complete_for_progress = Arc::clone(&scan_complete);
+    let phase_for_progress = Arc::clone(&phase_str);
+    let app_handle_clone = app_handle.clone();
     
-    #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-    struct NormalizedChain {
-        base_module: String,
-        base_offset: u32,
-        offsets: Vec<i64>, // offsets to add after each dereference
-    }
-    
-    // Find chains for each file
-    let mut chains_per_file: Vec<Vec<NormalizedChain>> = Vec::new();
-    
-    for (file_idx, target_addr) in target_addresses.iter().enumerate() {
-        let reverse_map = &reverse_maps[file_idx];
-        let pointer_map = &all_pointer_maps[file_idx];
-        let mut file_chains: Vec<NormalizedChain> = Vec::new();
-        // Track visited addresses with minimum depth to allow revisiting at shorter paths
-        let mut visited: HashMap<u64, usize> = HashMap::new();
-        
-        // Progress tracking
-        let mut nodes_processed: u64 = 0;
-        let mut last_progress_emit: u64 = 0;
-        
-        // BFS: (current_address, offsets_so_far)
-        // offsets_so_far contains the offsets from the current position to the target
-        let mut queue: Vec<(u64, Vec<i64>)> = vec![(*target_addr, vec![])];
-        
-        while let Some((current_addr, offsets)) = queue.pop() {
-            let current_depth = offsets.len();
-            nodes_processed += 1;
+    // Spawn progress emitter in a std::thread (not tokio) so it runs independently
+    let progress_thread = std::thread::spawn(move || {
+        let mut last_nodes = 0u64;
+        let mut last_chains = 0u64;
+        let mut last_phase = String::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
             
-            // Emit progress every 1000 nodes
-            if nodes_processed - last_progress_emit >= 1000 {
-                last_progress_emit = nodes_processed;
-                let _ = app_handle.emit("ptr-scan-progress", serde_json::json!({
-                    "nodesProcessed": nodes_processed,
-                    "chainsFound": file_chains.len(),
-                    "fileIndex": file_idx,
-                    "totalFiles": files.len()
-                }));
-            }
-            
-            // Skip if we've already found this address at a shorter or equal depth
-            if let Some(&prev_depth) = visited.get(&current_addr) {
-                if prev_depth <= current_depth {
-                    continue;
-                }
-            }
-            visited.insert(current_addr, current_depth);
-            
-            // Find addresses that point to current_addr (with offset consideration)
-            for pointed_addr in current_addr.saturating_sub(max_offset as u64)..=current_addr {
-                if let Some(ptrs) = reverse_map.get(&pointed_addr) {
-                    let delta = (current_addr as i64) - (pointed_addr as i64);
-                    
-                    for (ptr_addr, static_data) in ptrs {
-                        let mut new_offsets = vec![delta];
-                        new_offsets.extend(offsets.iter().copied());
-                        
-                        // Check depth AFTER adding new offset
-                        // new_offsets.len() is the number of dereferences needed
-                        if new_offsets.len() > max_depth as usize {
-                            continue;
-                        }
-                        
-                        if let Some((module_idx, module_offset)) = static_data {
-                            // Found a chain starting from a static address
-                            let module_name = if (*module_idx as usize) < pointer_map.modules.len() {
-                                pointer_map.modules[*module_idx as usize].name.clone()
-                            } else {
-                                format!("module_{}", module_idx)
-                            };
-                            
-                            file_chains.push(NormalizedChain {
-                                base_module: module_name,
-                                base_offset: *module_offset,
-                                offsets: new_offsets,
-                            });
-                            
-                            if file_chains.len() >= max_results {
-                                break;
-                            }
-                        } else {
-                            // Continue searching backwards only if we haven't exceeded depth
-                            queue.push((*ptr_addr, new_offsets));
-                        }
-                    }
-                }
-                
-                if file_chains.len() >= max_results {
-                    break;
-                }
-            }
-            
-            if file_chains.len() >= max_results {
+            if complete_for_progress.load(Ordering::Relaxed) {
                 break;
             }
+            
+            let nodes = nodes_for_progress.load(Ordering::Relaxed);
+            let chains = chains_for_progress.load(Ordering::Relaxed);
+            let file_idx = file_idx_for_progress.load(Ordering::Relaxed);
+            let phase = phase_for_progress.lock().unwrap().clone();
+            
+            // Emit if there's any change in nodes, chains, or phase
+            if nodes != last_nodes || chains != last_chains || phase != last_phase {
+                last_nodes = nodes;
+                last_chains = chains;
+                last_phase = phase.clone();
+                let _ = app_handle_clone.emit("ptr-scan-progress", serde_json::json!({
+                    "nodesProcessed": nodes,
+                    "chainsFound": chains,
+                    "fileIndex": file_idx,
+                    "totalFiles": total_files,
+                    "phase": phase
+                }));
+            }
+        }
+    });
+    
+    // Clone counters for the blocking computation
+    let nodes_for_scan = Arc::clone(&nodes_counter);
+    let chains_for_scan = Arc::clone(&chains_counter);
+    let file_idx_for_scan = Arc::clone(&file_idx_counter);
+    let complete_for_scan = Arc::clone(&scan_complete);
+    let phase_for_scan = Arc::clone(&phase_str);
+    
+    // Move heavy computation to blocking thread pool
+    let result = tokio::task::spawn_blocking(move || {
+        // Update phase
+        *phase_for_scan.lock().unwrap() = "decompressing".to_string();
+        
+        // Decompress and parse all files in parallel
+        let all_pointer_maps: Vec<PointerMapData> = file_data
+            .par_iter()
+            .map(|compressed_data| {
+                let data = decompress_size_prepended(compressed_data)
+                    .map_err(|e| format!("Failed to decompress: {}", e))?;
+                parse_pointer_map(&data)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        
+        // Update phase to scanning
+        *phase_for_scan.lock().unwrap() = "scanning".to_string();
+        
+        // Optimized reverse map with sorted keys for binary search
+        struct OptimizedReverseMap {
+            sorted_targets: Vec<u64>,
+            map: HashMap<u64, Vec<(u64, Option<(u32, u32)>)>>,
         }
         
-        chains_per_file.push(file_chains);
-    }
-    
-    // Find chains that exist in ALL files (same module name, base offset, and offset sequence)
-    if chains_per_file.is_empty() {
-        return Ok(vec![]);
-    }
-    
-    // Start with chains from first file, then intersect with others
-    let first_chains: HashSet<NormalizedChain> = chains_per_file[0].iter().cloned().collect();
-    let mut common_chains = first_chains;
-    
-    for file_chains in chains_per_file.iter().skip(1) {
-        let file_chain_set: HashSet<NormalizedChain> = file_chains.iter().cloned().collect();
-        common_chains = common_chains.intersection(&file_chain_set).cloned().collect();
-    }
-    
-    // Convert to results
-    for chain in common_chains.iter().take(100) {
-        let mut result_chain: Vec<PointerChainStep> = vec![PointerChainStep {
-            module: Some(chain.base_module.clone()),
-            offset: chain.base_offset as i64,
-        }];
+        // Build reverse maps in parallel
+        let reverse_maps: Vec<OptimizedReverseMap> = all_pointer_maps
+            .par_iter()
+            .map(|pm| {
+                let mut map: HashMap<u64, Vec<(u64, Option<(u32, u32)>)>> = HashMap::new();
+                for (target, pointers) in &pm.pointers {
+                    for (ptr_addr, static_data) in pointers {
+                        map.entry(*target).or_default().push((*ptr_addr, *static_data));
+                    }
+                }
+                let mut sorted_targets: Vec<u64> = map.keys().cloned().collect();
+                sorted_targets.sort_unstable();
+                OptimizedReverseMap { sorted_targets, map }
+            })
+            .collect();
         
-        for &offset in &chain.offsets {
-            result_chain.push(PointerChainStep {
-                module: None,
-                offset,
-            });
+        #[derive(Clone, Debug, Hash, Eq, PartialEq)]
+        struct NormalizedChain {
+            base_module: String,
+            base_offset: u32,
+            offsets: Vec<i64>,
         }
         
-        results.push(PointerScanResult {
-            chain: result_chain,
-            final_address: format!("0x{:X}", target_addresses[0]),
-        });
-    }
+        // Parallel BFS chain finder using level-by-level parallelism
+        fn find_chains_parallel(
+            target_addr: u64,
+            reverse_map: &OptimizedReverseMap,
+            pointer_map: &PointerMapData,
+            max_depth: u32,
+            max_offset: u32,
+            max_chains: usize,
+            nodes_counter: &Arc<AtomicU64>,
+            chains_counter: &Arc<AtomicU64>,
+            candidate_filter: Option<&HashSet<NormalizedChain>>,
+        ) -> Vec<NormalizedChain> {
+            let chains: Arc<Mutex<Vec<NormalizedChain>>> = Arc::new(Mutex::new(Vec::new()));
+            let visited: Arc<Mutex<HashMap<u64, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+            let found_enough = Arc::new(AtomicBool::new(false));
+            
+            // Start with target address
+            let mut current_level: Vec<(u64, Vec<i64>)> = vec![(target_addr, vec![])];
+            
+            for depth in 0..max_depth as usize {
+                if current_level.is_empty() || found_enough.load(Ordering::Relaxed) {
+                    break;
+                }
+                
+                // Check for cancellation
+                if PTRSCAN_CANCEL.load(Ordering::Relaxed) {
+                    break;
+                }
+                
+                // Process current level in parallel
+                let next_level: Vec<(u64, Vec<i64>)> = current_level
+                    .par_iter()
+                    .flat_map(|(current_addr, offsets)| {
+                        if found_enough.load(Ordering::Relaxed) || PTRSCAN_CANCEL.load(Ordering::Relaxed) {
+                            return vec![];
+                        }
+                        
+                        let current_addr = *current_addr;
+                        let current_depth = offsets.len();
+                        
+                        // Update progress
+                        nodes_counter.fetch_add(1, Ordering::Relaxed);
+                        
+                        // Check visited
+                        {
+                            let mut visited_lock = visited.lock().unwrap();
+                            if let Some(&prev_depth) = visited_lock.get(&current_addr) {
+                                if prev_depth <= current_depth {
+                                    return vec![];
+                                }
+                            }
+                            visited_lock.insert(current_addr, current_depth);
+                        }
+                        
+                        // Binary search for range
+                        let range_start = current_addr.saturating_sub(max_offset as u64);
+                        let start_idx = reverse_map.sorted_targets.partition_point(|&x| x < range_start);
+                        
+                        let mut local_next: Vec<(u64, Vec<i64>)> = Vec::new();
+                        
+                        for &pointed_addr in &reverse_map.sorted_targets[start_idx..] {
+                            if pointed_addr > current_addr || found_enough.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            
+                            if let Some(ptrs) = reverse_map.map.get(&pointed_addr) {
+                                let delta = (current_addr as i64) - (pointed_addr as i64);
+                                
+                                for (ptr_addr, static_data) in ptrs {
+                                    let mut new_offsets = vec![delta];
+                                    new_offsets.extend(offsets.iter().copied());
+                                    
+                                    if new_offsets.len() > max_depth as usize {
+                                        continue;
+                                    }
+                                    
+                                    if let Some((module_idx, module_offset)) = static_data {
+                                        let module_name = if (*module_idx as usize) < pointer_map.modules.len() {
+                                            pointer_map.modules[*module_idx as usize].name.clone()
+                                        } else {
+                                            format!("module_{}", module_idx)
+                                        };
+                                        
+                                        let chain = NormalizedChain {
+                                            base_module: module_name,
+                                            base_offset: *module_offset,
+                                            offsets: new_offsets.clone(),
+                                        };
+                                        
+                                        let should_add = match candidate_filter {
+                                            Some(filter) => filter.contains(&chain),
+                                            None => true,
+                                        };
+                                        
+                                        if should_add {
+                                            let mut chains_lock = chains.lock().unwrap();
+                                            chains_lock.push(chain);
+                                            chains_counter.fetch_add(1, Ordering::Relaxed);
+                                            if chains_lock.len() >= max_chains {
+                                                found_enough.store(true, Ordering::Relaxed);
+                                                return vec![];
+                                            }
+                                        }
+                                    } else if depth + 1 < max_depth as usize {
+                                        local_next.push((*ptr_addr, new_offsets));
+                                    }
+                                }
+                            }
+                        }
+                        
+                        local_next
+                    })
+                    .collect();
+                
+                current_level = next_level;
+            }
+            
+            Arc::try_unwrap(chains).unwrap().into_inner().unwrap()
+        }
+        
+        // Reset counters for first file
+        nodes_for_scan.store(0, Ordering::Relaxed);
+        chains_for_scan.store(0, Ordering::Relaxed);
+        file_idx_for_scan.store(0, Ordering::Relaxed);
+        
+        // Find chains in first file
+        let first_chains = find_chains_parallel(
+            target_addresses[0],
+            &reverse_maps[0],
+            &all_pointer_maps[0],
+            max_depth,
+            max_offset,
+            max_results * 10,
+            &nodes_for_scan,
+            &chains_for_scan,
+            None,
+        );
+        
+        if first_chains.is_empty() {
+            complete_for_scan.store(true, Ordering::Relaxed);
+            return Ok(vec![]);
+        }
+        
+        // Check for cancellation after first file
+        if PTRSCAN_CANCEL.load(Ordering::Relaxed) {
+            complete_for_scan.store(true, Ordering::Relaxed);
+            return Err("Scan cancelled".to_string());
+        }
+        
+        let mut candidate_chains: HashSet<NormalizedChain> = first_chains.into_iter().collect();
+        
+        // Filter with subsequent files
+        for (file_idx, target_addr) in target_addresses.iter().enumerate().skip(1) {
+            if candidate_chains.is_empty() {
+                break;
+            }
+            
+            // Check for cancellation
+            if PTRSCAN_CANCEL.load(Ordering::Relaxed) {
+                complete_for_scan.store(true, Ordering::Relaxed);
+                return Err("Scan cancelled".to_string());
+            }
+            
+            // Reset counters for this file
+            nodes_for_scan.store(0, Ordering::Relaxed);
+            chains_for_scan.store(0, Ordering::Relaxed);
+            file_idx_for_scan.store(file_idx as u64, Ordering::Relaxed);
+            
+            let file_chains = find_chains_parallel(
+                *target_addr,
+                &reverse_maps[file_idx],
+                &all_pointer_maps[file_idx],
+                max_depth,
+                max_offset,
+                max_results * 10,
+                &nodes_for_scan,
+                &chains_for_scan,
+                Some(&candidate_chains),
+            );
+            
+            let file_chain_set: HashSet<NormalizedChain> = file_chains.into_iter().collect();
+            candidate_chains = candidate_chains.intersection(&file_chain_set).cloned().collect();
+        }
+        
+        complete_for_scan.store(true, Ordering::Relaxed);
+        
+        // Convert to results
+        let results: Vec<PointerScanResult> = candidate_chains
+            .iter()
+            .take(100)
+            .map(|chain| {
+                let mut result_chain: Vec<PointerChainStep> = vec![PointerChainStep {
+                    module: Some(chain.base_module.clone()),
+                    offset: chain.base_offset as i64,
+                }];
+                
+                for &offset in &chain.offsets {
+                    result_chain.push(PointerChainStep {
+                        module: None,
+                        offset,
+                    });
+                }
+                
+                PointerScanResult {
+                    chain: result_chain,
+                    final_address: format!("0x{:X}", target_addresses[0]),
+                }
+            })
+            .collect();
+        
+        Ok::<Vec<PointerScanResult>, String>(results)
+    }).await.map_err(|e| format!("Task join error: {}", e))??;
     
-    Ok(results)
+    // Signal completion and wait for progress thread
+    scan_complete.store(true, Ordering::Relaxed);
+    let _ = progress_thread.join();
+    
+    // Emit final progress
+    let _ = app_handle.emit("ptr-scan-progress", serde_json::json!({
+        "nodesProcessed": nodes_counter.load(std::sync::atomic::Ordering::Relaxed),
+        "chainsFound": chains_counter.load(std::sync::atomic::Ordering::Relaxed),
+        "fileIndex": files.len() - 1,
+        "totalFiles": files.len(),
+        "phase": "complete"
+    }));
+    
+    Ok(result)
+}
+
+/// Cancel an ongoing pointer scan
+#[tauri::command]
+fn cancel_pointer_scan() -> Result<bool, String> {
+    use std::sync::atomic::Ordering;
+    PTRSCAN_CANCEL.store(true, Ordering::Relaxed);
+    Ok(true)
 }
 
 struct ModuleInfo {
@@ -6689,6 +6905,7 @@ pub fn run() {
             // Pointer scan commands
             open_pointermap_files_dialog,
             run_pointer_scan,
+            cancel_pointer_scan,
             // WASM analysis commands
             save_wasm_binary,
             list_wasm_files,

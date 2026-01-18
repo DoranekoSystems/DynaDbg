@@ -565,7 +565,7 @@ static std::uint64_t get_image_size_64(int pid, mach_vm_address_t base_address)
                 return 0;
             }
             // For dyld shared cache libraries, segments are not contiguous.
-            // Return __TEXT segment size only (matches Frida's behavior)
+            // Return __TEXT segment size only
             if (strncmp(seg.segname, "__TEXT", 16) == 0)
             {
                 text_size = seg.vmsize;

@@ -168,8 +168,13 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
   onClearScan,
 }) => {
   // Use global app state
-  const { ui, uiActions } = useAppState();
+  const { ui, uiActions, system } = useAppState();
   const rawScanSettings = ui.scannerState.scanSettings;
+  
+  // Check if target is iOS or Android (YARA not supported due to wasmtime limitations)
+  const isIOS = system.serverInfo?.target_os?.toLowerCase() === "ios";
+  const isAndroid = system.serverInfo?.target_os?.toLowerCase() === "android";
+  const isYaraDisabled = isIOS || isAndroid;
   
   // Collapse state for Search Mode section
   const [searchModeCollapsed, setSearchModeCollapsed] = React.useState(true);
@@ -398,9 +403,9 @@ export const ScannerSidebar: React.FC<ScannerSidebarProps> = ({
               />
               <ResponsiveFormControlLabel
                 value="yara"
-                control={<Radio size="small" disabled={isSettingsLocked} />}
-                label="YARA"
-                sx={{ mr: 1 }}
+                control={<Radio size="small" disabled={isSettingsLocked || isYaraDisabled} />}
+                label={"YARA"}
+                sx={{ mr: 1, opacity: isYaraDisabled ? 0.5 : 1 }}
               />
               <ResponsiveFormControlLabel
                 value="ptr"

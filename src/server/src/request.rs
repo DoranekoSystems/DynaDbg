@@ -30,7 +30,7 @@ pub struct WriteMemoryRequest {
 pub struct MemoryScanRequest {
     pub pattern: String,
     #[serde(default)]
-    pub pattern_max: Option<String>,  // For range search: pattern is min, pattern_max is max
+    pub pattern_max: Option<String>, // For range search: pattern is min, pattern_max is max
     pub address_ranges: Vec<(usize, usize)>,
     pub find_type: String,
     pub data_type: String,
@@ -44,7 +44,7 @@ pub struct MemoryScanRequest {
 pub struct MemoryFilterRequest {
     pub pattern: String,
     #[serde(default)]
-    pub pattern_max: Option<String>,  // For range filter: pattern is min, pattern_max is max
+    pub pattern_max: Option<String>, // For range filter: pattern is min, pattern_max is max
     pub data_type: String,
     pub scan_id: String,
     pub filter_method: String,
@@ -313,9 +313,9 @@ pub struct ClientVerificationResponse {
 #[derive(Deserialize)]
 pub struct ContinueExecutionRequest {
     #[serde(default)]
-    pub thread_id: Option<u64>,  // For backward compatibility (single thread)
+    pub thread_id: Option<u64>, // For backward compatibility (single thread)
     #[serde(default)]
-    pub thread_ids: Option<Vec<u64>>,  // Multiple threads
+    pub thread_ids: Option<Vec<u64>>, // Multiple threads
 }
 
 #[derive(Serialize)]
@@ -323,7 +323,7 @@ pub struct ContinueExecutionResponse {
     pub success: bool,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub results: Option<Vec<ThreadContinueResult>>,  // Details for multiple threads
+    pub results: Option<Vec<ThreadContinueResult>>, // Details for multiple threads
 }
 
 #[derive(Serialize)]
@@ -555,4 +555,31 @@ pub struct GetSignalConfigsResponse {
 #[derive(Deserialize)]
 pub struct RemoveSignalConfigRequest {
     pub signal: i32,
+}
+
+// PointerMap generation types
+#[derive(Serialize, Clone)]
+pub struct PointerMapProgressResponse {
+    pub task_id: String,
+    pub progress_percentage: f64,
+    pub current_phase: String,
+    pub processed_regions: u64,
+    pub total_regions: u64,
+    pub processed_bytes: u64,
+    pub total_bytes: u64,
+    pub is_generating: bool,
+    pub is_complete: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PointerMapProgressRequest {
+    pub task_id: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PointerMapStartResponse {
+    pub success: bool,
+    pub task_id: String,
+    pub message: String,
 }

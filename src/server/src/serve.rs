@@ -235,6 +235,33 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
             api::generate_pointermap_handler(pid_state).await
         });
 
+    let start_pointermap = api
+        .and(warp::path!("memory" / "pointermap" / "start"))
+        .and(warp::post())
+        .and(api::with_auth())
+        .and(api::with_state(pid_state.clone()))
+        .and_then(|pid_state| async move {
+            api::start_pointermap_handler(pid_state).await
+        });
+
+    let pointermap_progress = api
+        .and(warp::path!("memory" / "pointermap" / "progress"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(api::with_auth())
+        .and_then(|progress_request| async move {
+            api::pointermap_progress_handler(progress_request).await
+        });
+
+    let pointermap_download = api
+        .and(warp::path!("memory" / "pointermap" / "download"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(api::with_auth())
+        .and_then(|progress_request| async move {
+            api::pointermap_download_handler(progress_request).await
+        });
+
     // Debug Routes
     let set_watchpoint = api
         .and(warp::path!("debug" / "watchpoint"))
@@ -681,6 +708,9 @@ pub async fn serve(mode: i32, host: IpAddr, port: u16) {
         .or(clear_scan)
         .or(disassemble)
         .or(generate_pointermap)
+        .or(start_pointermap)
+        .or(pointermap_progress)
+        .or(pointermap_download)
         .or(resolve_addr)
         .boxed();
     

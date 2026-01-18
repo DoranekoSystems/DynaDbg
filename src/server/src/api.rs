@@ -113,6 +113,10 @@ lazy_static! {
         RwLock::new(HashMap::new());
     static ref GLOBAL_FILTER_PROGRESS: RwLock<HashMap<String, request::FilterProgressResponse>> =
         RwLock::new(HashMap::new());
+    static ref GLOBAL_POINTERMAP_PROGRESS: RwLock<HashMap<String, request::PointerMapProgressResponse>> =
+        RwLock::new(HashMap::new());
+    static ref GLOBAL_POINTERMAP_DATA: RwLock<HashMap<String, Vec<u8>>> =
+        RwLock::new(HashMap::new());
     static ref JSON_QUEUE: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
     static ref GLOBAL_PROCESS_STATE: RwLock<bool> = RwLock::new(false);
     static ref SCAN_STOP_FLAGS: RwLock<HashMap<String, Arc<Mutex<bool>>>> = RwLock::new(HashMap::new());
@@ -4693,7 +4697,7 @@ pub async fn get_app_icon_handler(
 
 // Spawn app via FBSSystemService (iOS/macOS)
 pub async fn spawn_app_handler(
-    _pid_state: Arc<Mutex<Option<i32>>>,
+    pid_state: Arc<Mutex<Option<i32>>>,
     _request: request::SpawnAppRequest,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -5206,6 +5210,7 @@ pub async fn wasm_info_handler() -> Result<impl warp::Reply, warp::Rejection> {
 
 /// YARA memory scan handler
 /// Scans process memory using YARA rules with progress tracking
+#[cfg(not(target_os = "ios"))]
 pub async fn yara_scan_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
     scan_request: request::YaraScanRequest,
@@ -5437,6 +5442,23 @@ pub async fn yara_scan_handler(
     }
 }
 
+/// YARA memory scan handler stub for iOS (not supported)
+#[cfg(target_os = "ios")]
+pub async fn yara_scan_handler(
+    _pid_state: Arc<Mutex<Option<i32>>>,
+    scan_request: request::YaraScanRequest,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let response = request::YaraScanResponse {
+        success: false,
+        message: "YARA scanning is not supported on this platform".to_string(),
+        scan_id: scan_request.scan_id,
+        matches: vec![],
+        total_matches: 0,
+        scanned_bytes: 0,
+    };
+    Ok(warp::reply::json(&response))
+}
+
 /// Handler for generating full pointermap (entire process memory)
 pub async fn generate_pointermap_handler(
     pid_state: Arc<Mutex<Option<i32>>>,
@@ -5474,5 +5496,183 @@ pub async fn generate_pointermap_handler(
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_string(&response).unwrap()))
             .unwrap())
+    }
+}
+/// Handler for starting pointermap generation with progress tracking
+pub async fn start_pointermap_handler(
+    pid_state: Arc<Mutex<Option<i32>>>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let pid = match *pid_state.lock().unwrap() {
+        Some(pid) => pid,
+        None => {
+            let response = request::PointerMapStartResponse {
+                success: false,
+                task_id: String::new(),
+                message: "No process attached".to_string(),
+            };
+            return Ok(warp::reply::json(&response));
+        }
+    };
+
+    // Generate a unique task ID
+    let task_id = format!("ptrmap_{}", chrono::Utc::now().timestamp_millis());
+    let task_id_clone = task_id.clone();
+
+    // Initialize progress
+    {
+        let mut progress_map = GLOBAL_POINTERMAP_PROGRESS.write().unwrap();
+        progress_map.insert(task_id.clone(), request::PointerMapProgressResponse {
+            task_id: task_id.clone(),
+            progress_percentage: 0.0,
+            current_phase: "Starting".to_string(),
+            processed_regions: 0,
+            total_regions: 0,
+            processed_bytes: 0,
+            total_bytes: 0,
+            is_generating: true,
+            is_complete: false,
+            error: None,
+        });
+    }
+
+    // Start background thread for generation
+    let task_id_thread = task_id.clone();
+    std::thread::spawn(move || {
+        let progress_callback = {
+            let task_id = task_id_thread.clone();
+            std::sync::Arc::new(move |phase: &str, regions_done: u64, total_regions: u64, bytes_done: u64, total_bytes: u64| {
+                if let Ok(mut progress_map) = GLOBAL_POINTERMAP_PROGRESS.write() {
+                    if let Some(progress) = progress_map.get_mut(&task_id) {
+                        progress.current_phase = phase.to_string();
+                        progress.processed_regions = regions_done;
+                        progress.total_regions = total_regions;
+                        progress.processed_bytes = bytes_done;
+                        progress.total_bytes = total_bytes;
+                        if total_bytes > 0 {
+                            progress.progress_percentage = (bytes_done as f64 / total_bytes as f64) * 100.0;
+                        }
+                    }
+                }
+            })
+        };
+
+        match ptrscan::generate_pointermap_with_progress(pid, Some(progress_callback)) {
+            Ok(data) => {
+                // Store the generated data
+                {
+                    let mut data_map = GLOBAL_POINTERMAP_DATA.write().unwrap();
+                    data_map.insert(task_id_thread.clone(), data);
+                }
+                // Mark as complete
+                if let Ok(mut progress_map) = GLOBAL_POINTERMAP_PROGRESS.write() {
+                    if let Some(progress) = progress_map.get_mut(&task_id_thread) {
+                        progress.is_generating = false;
+                        progress.is_complete = true;
+                        progress.progress_percentage = 100.0;
+                        progress.current_phase = "Complete".to_string();
+                    }
+                }
+            }
+            Err(e) => {
+                // Mark as error
+                if let Ok(mut progress_map) = GLOBAL_POINTERMAP_PROGRESS.write() {
+                    if let Some(progress) = progress_map.get_mut(&task_id_thread) {
+                        progress.is_generating = false;
+                        progress.is_complete = false;
+                        progress.error = Some(e);
+                    }
+                }
+            }
+        }
+    });
+
+    let response = request::PointerMapStartResponse {
+        success: true,
+        task_id: task_id_clone,
+        message: "PointerMap generation started".to_string(),
+    };
+    Ok(warp::reply::json(&response))
+}
+
+/// Handler for getting pointermap generation progress
+pub async fn pointermap_progress_handler(
+    progress_request: request::PointerMapProgressRequest,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let progress_map = GLOBAL_POINTERMAP_PROGRESS.read().unwrap();
+    if let Some(progress) = progress_map.get(&progress_request.task_id) {
+        Ok(warp::reply::json(progress))
+    } else {
+        let response = request::PointerMapProgressResponse {
+            task_id: progress_request.task_id,
+            progress_percentage: 0.0,
+            current_phase: "Unknown".to_string(),
+            processed_regions: 0,
+            total_regions: 0,
+            processed_bytes: 0,
+            total_bytes: 0,
+            is_generating: false,
+            is_complete: false,
+            error: Some("Task not found".to_string()),
+        };
+        Ok(warp::reply::json(&response))
+    }
+}
+
+/// Handler for downloading completed pointermap data
+pub async fn pointermap_download_handler(
+    progress_request: request::PointerMapProgressRequest,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    // Check if complete
+    let is_complete = {
+        let progress_map = GLOBAL_POINTERMAP_PROGRESS.read().unwrap();
+        progress_map.get(&progress_request.task_id)
+            .map(|p| p.is_complete)
+            .unwrap_or(false)
+    };
+
+    if !is_complete {
+        let response = serde_json::json!({
+            "success": false,
+            "message": "PointerMap generation not complete"
+        });
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&response).unwrap()))
+            .unwrap());
+    }
+
+    // Get and remove data
+    let data = {
+        let mut data_map = GLOBAL_POINTERMAP_DATA.write().unwrap();
+        data_map.remove(&progress_request.task_id)
+    };
+
+    // Clean up progress
+    {
+        let mut progress_map = GLOBAL_POINTERMAP_PROGRESS.write().unwrap();
+        progress_map.remove(&progress_request.task_id);
+    }
+
+    match data {
+        Some(data) => {
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Disposition", "attachment; filename=\"pointermap.dptr\"")
+                .body(Body::from(data))
+                .unwrap())
+        }
+        None => {
+            let response = serde_json::json!({
+                "success": false,
+                "message": "PointerMap data not found"
+            });
+            Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&response).unwrap()))
+                .unwrap())
+        }
     }
 }

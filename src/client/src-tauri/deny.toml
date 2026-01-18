@@ -1,0 +1,91 @@
+# cargo-deny configuration
+# Run with: cargo deny check
+# Install with: cargo install cargo-deny
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+version = 2
+
+# Use 'ignore' to specify advisories to skip
+ignore = [
+    # Example: "RUSTSEC-2020-0001"
+]
+
+[licenses]
+# List of explicitly allowed licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",        # Boost Software License
+    "Unicode-DFS-2016",
+    "MPL-2.0",        # Mozilla Public License (weak copyleft, file-level only)
+]
+
+# Confidence threshold for detecting a license
+confidence-threshold = 0.8
+
+# Allow 1 or more licenses on a per-crate basis
+exceptions = [
+    # Example: { allow = ["LGPL-3.0"], name = "some-crate" }
+]
+
+# Deny copyleft licenses that would require open-sourcing proprietary code
+[licenses.private]
+ignore = false
+registries = []
+
+# Some crates don't have (easily) machine readable licensing
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[[licenses.clarify]]
+name = "encoding_rs"
+expression = "(Apache-2.0 OR MIT) AND BSD-3-Clause"
+license-files = [{ path = "LICENSE", hash = 0x19881434 }]
+
+[bans]
+# Lint level for when multiple versions of the same crate are detected
+multiple-versions = "warn"
+# Lint level for when a crate version has been yanked from crates.io
+wildcards = "allow"
+highlight = "all"
+
+# List of crates to deny
+deny = [
+    # Add any crates you want to explicitly deny
+]
+
+# List of crates to allow
+allow = [
+    # Add any crates you want to explicitly allow
+]
+
+# Certain crates/versions that will be skipped when doing duplicate detection
+skip = [
+    # Add any crates you want to skip
+]
+
+skip-tree = [
+    # Add any crate trees you want to skip
+]
+
+[sources]
+# Lint level for what to happen when a crate from a crate registry is not found
+unknown-registry = "warn"
+# Lint level for what to happen when a crate from a git repository is not found
+unknown-git = "warn"
+# List of URLs for allowed crate registries
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# List of URLs for allowed Git repositories
+allow-git = []

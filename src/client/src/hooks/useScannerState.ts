@@ -986,10 +986,38 @@ export const useScannerState = () => {
           chainsFound: number;
           fileIndex: number;
           totalFiles: number;
+          phase?: string;
         }>("ptr-scan-progress", (event) => {
-          const { nodesProcessed, chainsFound, fileIndex, totalFiles } = event.payload;
+          const { nodesProcessed, chainsFound, fileIndex, totalFiles, phase } = event.payload;
+          
+          let progressText: string;
+          let progressPercent: number;
+          
+          switch (phase) {
+            case "loading":
+              progressText = `Loading file ${fileIndex + 1}/${totalFiles}...`;
+              progressPercent = 10 + Math.floor((fileIndex / totalFiles) * 10);
+              break;
+            case "decompressing":
+              progressText = "Decompressing files...";
+              progressPercent = 25;
+              break;
+            case "scanning":
+              progressText = `File ${fileIndex + 1}/${totalFiles}: Nodes: ${nodesProcessed.toLocaleString()} / Chains: ${chainsFound.toLocaleString()}`;
+              progressPercent = 30 + Math.floor((fileIndex / totalFiles) * 50);
+              break;
+            case "complete":
+              progressText = `Completed: ${chainsFound.toLocaleString()} chains found`;
+              progressPercent = 80;
+              break;
+            default:
+              progressText = `File ${fileIndex + 1}/${totalFiles}: Nodes: ${nodesProcessed.toLocaleString()} / Chains: ${chainsFound.toLocaleString()}`;
+              progressPercent = 30 + Math.floor((fileIndex / totalFiles) * 50);
+          }
+          
           uiActions.updateScannerState({
-            currentRegion: `File ${fileIndex + 1}/${totalFiles}: Nodes: ${nodesProcessed.toLocaleString()} / Chains: ${chainsFound.toLocaleString()}`
+            scanProgress: progressPercent,
+            currentRegion: progressText
           });
         });
 
@@ -2269,6 +2297,27 @@ export const useScannerState = () => {
   const stopScan = useCallback(async () => {
     try {
       console.log(`Stopping scan: ${scannerState.scanId}`);
+      
+      // Get current settings from global store
+      const currentSettings = ui.scannerState.scanSettings as ScanSettings;
+      
+      // For pointer scan mode, use Tauri command to cancel
+      if (currentSettings.searchMode === "ptr") {
+        try {
+          await invoke("cancel_pointer_scan");
+          console.log("Pointer scan cancelled");
+        } catch (error) {
+          console.error("Failed to cancel pointer scan:", error);
+        }
+        setScannerState((prev) => ({
+          ...prev,
+          isScanning: false,
+          scanProgress: 0,
+        }));
+        uiActions.updateScannerState({ isScanning: false });
+        return;
+      }
+      
       const response = await apiClient.stopScan(scannerState.scanId);
 
       if (response.success) {

@@ -76,6 +76,15 @@ import {
   ScanHistoryItem,
 } from "../types/index";
 
+// Helper function to format bytes to human readable format
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 // Tab Panel Component
 function TabPanel(props: TabPanelProps) {
   const { children, value, index, ...other } = props;
@@ -750,11 +759,50 @@ export const ScannerContent: React.FC<ScannerContentProps> = ({
   // Generate PointerMap for a specific bookmark address
   const handleGeneratePointerMap = useCallback(async (address: string) => {
     setIsGeneratingPointerMap(true);
-    setPointerMapStatus({ message: "Generating PointerMap...", type: "info" });
+    setPointerMapStatus({ message: "Starting PointerMap generation...", type: "info" });
     
     try {
       const api = getApiClient();
-      const pointerMapData = await api.generatePointerMap();
+      
+      // Start pointermap generation with progress tracking
+      const startResponse = await api.startPointerMapGeneration();
+      if (!startResponse.success) {
+        throw new Error(startResponse.message || "Failed to start generation");
+      }
+      
+      const taskId = startResponse.task_id;
+      
+      // Poll for progress
+      let isComplete = false;
+      let lastProgress = 0;
+      while (!isComplete) {
+        await new Promise(resolve => setTimeout(resolve, 500)); // Poll every 500ms
+        
+        const progress = await api.getPointerMapProgress(taskId);
+        
+        if (progress.error) {
+          throw new Error(progress.error);
+        }
+        
+        // Update status with progress
+        const progressPct = Math.round(progress.progress_percentage);
+        if (progressPct !== lastProgress || progress.current_phase !== "Scanning memory") {
+          lastProgress = progressPct;
+          const bytesStr = progress.total_bytes > 0 
+            ? ` (${formatBytes(progress.processed_bytes)}/${formatBytes(progress.total_bytes)})`
+            : "";
+          setPointerMapStatus({ 
+            message: `${progress.current_phase}: ${progressPct}%${bytesStr}`, 
+            type: "info" 
+          });
+        }
+        
+        isComplete = progress.is_complete;
+      }
+      
+      // Download the completed pointermap
+      setPointerMapStatus({ message: "Downloading PointerMap data...", type: "info" });
+      const pointerMapData = await api.downloadPointerMap(taskId);
       
       // Create default filename with the target address
       const addressHex = address.replace("0x", "").replace("0X", "").toUpperCase();

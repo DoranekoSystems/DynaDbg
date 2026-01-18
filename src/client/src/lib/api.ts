@@ -1735,6 +1735,66 @@ class ApiClient {
     }
   }
 
+  /**
+   * Start pointermap generation with progress tracking
+   */
+  async startPointerMapGeneration(): Promise<{ success: boolean; task_id: string; message: string }> {
+    return this.request<{ success: boolean; task_id: string; message: string }>(
+      "/api/memory/pointermap/start",
+      { method: "POST" }
+    );
+  }
+
+  /**
+   * Get pointermap generation progress
+   */
+  async getPointerMapProgress(taskId: string): Promise<{
+    task_id: string;
+    progress_percentage: number;
+    current_phase: string;
+    processed_regions: number;
+    total_regions: number;
+    processed_bytes: number;
+    total_bytes: number;
+    is_generating: boolean;
+    is_complete: boolean;
+    error: string | null;
+  }> {
+    return this.request("/api/memory/pointermap/progress", {
+      method: "POST",
+      body: JSON.stringify({ task_id: taskId }),
+    });
+  }
+
+  /**
+   * Download completed pointermap data
+   */
+  async downloadPointerMap(taskId: string): Promise<ArrayBuffer> {
+    const headers: { [key: string]: string } = {
+      "Content-Type": "application/json",
+    };
+    if (this.authToken) {
+      headers["Authorization"] = `Bearer ${this.authToken}`;
+    }
+
+    const response = await fetch(`${this.baseUrl}/api/memory/pointermap/download`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ task_id: taskId }),
+    });
+
+    if (!response.ok) {
+      try {
+        const errorData = await response.json();
+        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+      } catch {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+    }
+
+    return response.arrayBuffer();
+  }
+
   // App management APIs (iOS)
   async getInstalledApps(): Promise<ApiResponse<{ apps: InstalledAppInfo[] }>> {
     return this.request<ApiResponse<{ apps: InstalledAppInfo[] }>>("/api/apps");
