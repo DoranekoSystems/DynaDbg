@@ -439,7 +439,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                     color: "white",
                   }}
                 >
-                  Enterprise Remote Analysis
+                  Advanced Remote Analysis
                 </Typography>
                 <Typography
                   variant="h6"
@@ -452,8 +452,8 @@ export const HomePage: React.FC<HomePageProps> = ({
                   }}
                 >
                   Break through the barriers of traditional debugging. Analyze
-                  systems across networks with enterprise-grade security and
-                  real-time performance.
+                  systems across networks with robust security and real-time
+                  performance.
                 </Typography>
                 <Box
                   sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}
